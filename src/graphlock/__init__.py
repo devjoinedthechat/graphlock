@@ -1,6 +1,6 @@
 """graphlock: catch LangGraph changes that break paused threads before you deploy them."""
 
-from graphlock.check import check
+from graphlock.check import check, check_rollback
 from graphlock.findings import RULES, Finding, Rule, Severity
 from graphlock.migrations import (
     Migration,
@@ -28,6 +28,7 @@ __all__ = [
     "Severity",
     "ThreadIssue",
     "check",
+    "check_rollback",
     "convert_field",
     "defer_changed",
     "drop_field",

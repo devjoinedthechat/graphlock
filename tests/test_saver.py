@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -78,3 +79,31 @@ def test_wrapping_twice_replaces_the_migrations(make_saver: Callable[[], Any]) -
     assert isinstance(graph.checkpointer, MigratingSaver)
     assert graph.checkpointer.inner is saver
     assert graph.checkpointer.migrations == []
+
+
+def test_memory_is_bounded_and_resumes_still_write_through(make_saver: Callable[[], Any]) -> None:
+    """Reading many threads doesn't grow memory; an evicted thread is re-tracked by the resume's own read."""
+    saver = make_saver()
+    old = two_breakpoints(("x", "y3"))(saver)
+    for n in range(20):
+        old.invoke({"log": []}, {"configurable": {"thread_id": f"t{n}"}})
+    graph = gl.with_migrations(two_breakpoints(("y3", "x"))(saver), MIGRATIONS, max_tracked=5)
+    for n in range(20):
+        graph.get_state({"configurable": {"thread_id": f"t{n}"}})  # a dashboard polling every thread
+    assert len(graph.checkpointer._repaired) == 5
+
+    config = {"configurable": {"thread_id": "t0"}}  # long since evicted
+    graph.invoke(None, config)
+    assert log_of(graph.invoke(None, config))[-1] == "join"
+
+
+def test_repairs_are_counted_and_logged(
+    make_saver: Callable[[], Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    saver = make_saver()
+    two_breakpoints(("x", "y3"))(saver).invoke({"log": []}, CFG)
+    graph = gl.with_migrations(two_breakpoints(("y3", "x"))(saver), MIGRATIONS)
+    with caplog.at_level(logging.DEBUG, logger="graphlock"):
+        graph.get_state(CFG)
+    assert graph.checkpointer.stats == {"rename_channel('join:x+y3:join', 'join:y3+x:join')": 1}
+    assert "repaired thread t1" in caplog.text

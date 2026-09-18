@@ -64,7 +64,8 @@ uv run --isolated --with "langgraph==1.0.0" --with langgraph-checkpoint-sqlite -
 
 - **Carrying threads across a subgraph rename.** The subgraph's checkpoints live under a namespace
   built from the node name and a task id.
-- **`interrupt()` calls reached through helper functions**, one call deep, for GL401.
+- **`interrupt()` calls reached through attributes** (`self.ask()`), for GL401. Plain helper
+  functions are already followed.
 - **Postgres in CI**, next to the in-memory and SQLite checkpointers.
 - **A GitHub Action** wrapping `graphlock check --format github`.
 - **The Functional API** (`@entrypoint`).

@@ -143,3 +143,24 @@ def test_without_migrations_the_refund_is_never_issued(project: Path) -> None:
     )
     out = subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True).stdout
     assert out.strip() == "['drafted refund of 40 for A-101']"
+
+
+def test_reverse_reports_what_a_rollback_would_break(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Threads that pause at manager_review after the deploy are stranded if v1 comes back."""
+    assert main(["check", "--reverse"]) == EXIT_BREAKING
+    out = flat(capsys.readouterr().out)
+    assert out.startswith("Rollback check:")
+    assert "✗ GL101 node-removed manager_review" in out
+    assert "· GL203 field-removed currency" in out
+    assert "repaired by" not in out  # migrations don't run backwards
+
+    assert main(["check", "--reverse", "--format", "json"]) == EXIT_BREAKING
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["mode"] == "rollback"
+    assert doc["blocking"] == 1
+
+
+def test_rollback_to_the_same_code_is_clean(project: Path) -> None:
+    assert main(["check", "--reverse", "--graph", "refunds=refunds_v1:graph"]) == EXIT_OK

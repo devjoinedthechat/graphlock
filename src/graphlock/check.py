@@ -3,20 +3,32 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from graphlock import _lg
 from graphlock.findings import Finding, Severity
 from graphlock.migrations import Migration, resolve_class
-from graphlock.shape import GraphShape, NodeShape
+from graphlock.shape import GraphShape, NodeShape, iter_graphs
 
 # Channel classes that store the same shape (a bare value), so swapping one for another restores fine.
 _BARE_VALUE_KINDS = {"LastValue", "BinaryOperatorAggregate", "AnyValue", "UntrackedValue"}
 
 
-def check(old: GraphShape, new: GraphShape, migrations: Sequence[Migration] = ()) -> list[Finding]:
-    """Findings for a deploy that replaces `old` with `new`, with the ones `migrations` repair marked."""
-    findings = _check_graph(old, new, "")
+def check(
+    old: GraphShape,
+    new: GraphShape,
+    migrations: Sequence[Migration] = (),
+    *,
+    class_exists: Callable[[str], bool] | None = None,
+) -> list[Finding]:
+    """Findings for a deploy that replaces `old` with `new`, with the ones `migrations` repair marked.
+
+    `class_exists` says whether a class stored under `old` can still be rebuilt after the deploy. By
+    default it looks the class up in the running code, which is the new code. For a rollback, where
+    the running code is not the code being deployed, `check_rollback` passes the shape's own list.
+    """
+    exists = class_exists or (lambda path: resolve_class(path) is not None)
+    findings = _check_graph(old, new, "", exists)
     out = []
     for f in findings:
         handler = next((m for m in migrations if m.handles(f)), None)
@@ -32,17 +44,31 @@ def _with(f: Finding, **changes: object) -> Finding:
     return dataclasses.replace(f, **changes)  # type: ignore[arg-type]
 
 
-def _check_graph(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
+def check_rollback(deployed: GraphShape, rollback_to: GraphShape) -> list[Finding]:
+    """What rolling back from `deployed` to `rollback_to` would do to threads that ran on `deployed`.
+
+    Migrations don't run backwards, so nothing is marked repaired. The code for `rollback_to` isn't
+    importable here, so a stored class counts as present only if `rollback_to`'s shape records it.
+    """
+    known = {path for _, shape in _all_shapes(rollback_to) for path in shape["types"]}
+    return check(deployed, rollback_to, class_exists=known.__contains__)
+
+
+def _all_shapes(shape: GraphShape) -> list[tuple[str, GraphShape]]:
+    return list(iter_graphs(shape))
+
+
+def _check_graph(old: GraphShape, new: GraphShape, path: str, exists: Callable[[str], bool]) -> list[Finding]:
     findings: list[Finding] = []
     findings += _nodes(old, new, path)
     findings += _joins(old, new, path)
     findings += _state(old, new, path)
-    findings += _types(old, new, path)
+    findings += _types(old, new, path, exists)
     for name, node in old["nodes"].items():
         new_node = new["nodes"].get(name)
         old_sub, new_sub = node.get("subgraph"), (new_node or {}).get("subgraph")
         if old_sub is not None and new_sub is not None:
-            findings += _check_graph(old_sub, new_sub, f"{path}/{name}" if path else name)
+            findings += _check_graph(old_sub, new_sub, f"{path}/{name}" if path else name, exists)
     return findings
 
 
@@ -280,10 +306,10 @@ def _state(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
     return findings
 
 
-def _types(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
+def _types(old: GraphShape, new: GraphShape, path: str, exists: Callable[[str], bool]) -> list[Finding]:
     findings = []
     for type_path, kind in old["types"].items():
-        if type_path in new["types"] or resolve_class(type_path) is not None:
+        if type_path in new["types"] or exists(type_path):
             continue
         restored = "a plain dict" if kind == "pydantic" else "None or a plain dict"
         findings.append(

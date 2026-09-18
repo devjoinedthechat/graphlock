@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from graphlock import lockfile, report
-from graphlock.check import check
+from graphlock.check import check, check_rollback
 from graphlock.findings import Finding, Severity
 from graphlock.loader import ConfigError, load_config, load_graph, load_migrations, open_checkpointer
 from graphlock.scan import scan
@@ -51,6 +51,11 @@ def _parser() -> argparse.ArgumentParser:
     migrations(p)
     p.add_argument("--format", choices=["text", "json", "github"], default="text")
     p.add_argument("--strict", action="store_true", help="treat warnings as breaking")
+    p.add_argument(
+        "--reverse",
+        action="store_true",
+        help="report what rolling back to the locked version would break, once this code has run",
+    )
 
     p = sub.add_parser("scan", help="report which stored threads the graphs would break")
     common(p)
@@ -126,18 +131,29 @@ def _check(args: argparse.Namespace) -> int:
         if name not in locked:
             notes.append(f"{name} is not in {config.lockfile.name} yet; `graphlock lock` adds it.")
             continue
-        migrations = load_migrations(_migrations_path(args, config.migrations), name, config.root)
-        results[name] = check(locked[name], extract_shape(load_graph(path, config.root)), migrations)
+        current = extract_shape(load_graph(path, config.root))
+        if args.reverse:
+            results[name] = check_rollback(current, locked[name])
+        else:
+            migrations = load_migrations(_migrations_path(args, config.migrations), name, config.root)
+            results[name] = check(locked[name], current, migrations)
     for name in sorted(set(locked) - set(config.graphs)):
         notes.append(f"{name} is in {config.lockfile.name} but no longer configured.")
 
+    header = None
+    if args.reverse:
+        header = (
+            f"Rollback check: what threads that ran on this code would hit if you rolled back to "
+            f"{config.lockfile.name}. Migrations don't run backwards; a repair for a rollback has to "
+            "ship in the code you roll back to."
+        )
     if args.format == "json":
-        sys.stdout.write(report.check_json(results, notes))
+        sys.stdout.write(report.check_json(results, notes, header))
     elif args.format == "github":
         sys.stdout.write(report.check_github(results, config.lockfile.name))
-        sys.stdout.write(report.check_text(results, notes))
+        sys.stdout.write(report.check_text(results, notes, header))
     else:
-        sys.stdout.write(report.check_text(results, notes))
+        sys.stdout.write(report.check_text(results, notes, header))
 
     def fails(f: Finding) -> bool:
         return f.blocking or (args.strict and f.level is Severity.WARNING and f.handled_by is None)

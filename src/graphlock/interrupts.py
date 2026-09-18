@@ -84,18 +84,59 @@ def _is_interrupt_call(node: ast.AST) -> bool:
     )
 
 
+# How many calls deep to follow a node into the helpers it calls. Real nodes often wrap one helper
+# (an approval step shared by several nodes); deeper chains are rare, and each level costs a parse.
+MAX_HELPER_DEPTH = 2
+
+
 def interrupt_sites(fn: Callable[..., Any] | None) -> list[str] | None:
-    """The `interrupt(...)` calls in `fn`, in source order. None when the source can't be read."""
+    """The `interrupt(...)` calls `fn` makes, in the order it makes them. None when unreadable.
+
+    Calls to plain functions the node can see (module globals and closure variables) are followed
+    up to `MAX_HELPER_DEPTH` deep, and their `interrupt()` calls are listed where the helper is
+    called: a node that delegates its approval to a helper still has that approval's position.
+    """
     if fn is None:
         return None
+    return _sites(fn, depth=0, seen=set())
+
+
+def _sites(fn: Callable[..., Any], *, depth: int, seen: set[int]) -> list[str] | None:
     tree = _parse(fn)
     if tree is None:
         return None
+    seen = seen | {id(fn.__code__)}
     calls = sorted(
-        (n for n in ast.walk(tree) if _is_interrupt_call(n)),
-        key=lambda n: (n.lineno, n.col_offset),  # type: ignore[attr-defined]
+        (n for n in ast.walk(tree) if isinstance(n, ast.Call)),
+        key=lambda n: (n.lineno, n.col_offset),
     )
-    return [_site(c) for c in calls]
+    sites: list[str] = []
+    for call in calls:
+        if _is_interrupt_call(call):
+            sites.append(_site(call))
+            continue
+        if depth >= MAX_HELPER_DEPTH or not isinstance(call.func, ast.Name):
+            continue
+        helper = _visible(fn, call.func.id)
+        if helper is None or id(helper.__code__) in seen:
+            continue
+        inner = _sites(helper, depth=depth + 1, seen=seen)
+        if inner:
+            sites.extend(inner)
+    return sites
+
+
+def _visible(fn: Callable[..., Any], name: str) -> Callable[..., Any] | None:
+    """The plain Python function `name` refers to inside `fn`, if any: a closure variable or a global."""
+    code = fn.__code__
+    if fn.__closure__ and name in code.co_freevars:
+        try:
+            value = fn.__closure__[code.co_freevars.index(name)].cell_contents
+        except ValueError:  # an empty cell
+            return None
+    else:
+        value = getattr(fn, "__globals__", {}).get(name)
+    return value if inspect.isfunction(value) else None
 
 
 def _site(call: ast.AST) -> str:

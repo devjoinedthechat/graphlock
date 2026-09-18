@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import importlib
+import sys
 import typing
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
@@ -123,10 +123,16 @@ class _ClassRefRecorder:
         return getattr(self.inner, name)
 
 
-def _importable(module: str, name: str) -> bool:
-    try:
-        obj: Any = importlib.import_module(module)
-    except Exception:
+def _restorable(module: str, name: str) -> bool:
+    """Whether LangGraph could have rebuilt `module.name` when it loaded the checkpoint.
+
+    Never imports anything: stored data names these modules, and scanning a store must be no more
+    dangerous than resuming its threads. LangGraph's serializer imports a module when it rebuilds an
+    object, so after the load a restorable class is already in `sys.modules`. One that isn't either
+    failed to import or was blocked by the serializer's allowlist, and either way came back raw.
+    """
+    obj: Any = sys.modules.get(module)
+    if obj is None:
         return False
     for part in name.split("."):
         obj = getattr(obj, part, None)
@@ -278,12 +284,12 @@ class _Analysis:
             return self.issues
 
         for module, name in sorted(refs):
-            if not _importable(module, name):
+            if not _restorable(module, name):
                 self.value_issue(
                     "GL301",
                     f"{module}:{name}",
-                    f"Stores a {module}.{name}, which can't be imported any more; it restores as a plain "
-                    "dict or None.",
+                    f"Stores a {module}.{name}, which can't be imported any more or is blocked by the "
+                    "serializer's allowlist; it restores as a plain dict or None.",
                 )
 
         channels = self._restore(ckpt, saved.config)

@@ -17,7 +17,7 @@
   <a href="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
-  <img src="https://img.shields.io/badge/tests-167-brightgreen" alt="167 tests">
+  <img src="https://img.shields.io/badge/tests-181-brightgreen" alt="181 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
@@ -217,6 +217,7 @@ graph = graphlock.with_migrations(builder.compile(checkpointer=saver), MIGRATION
 |---|---|---|
 | `graphlock lock` | your code | What does the deployed graph look like? Writes `graphlock.json` |
 | `graphlock check` | your code and the lockfile | Which changes in this pull request can break stored threads? |
+| `graphlock check --reverse` | your code and the lockfile | What would a rollback break, once this code has run? |
 | `graphlock scan` | your code and the checkpointer | Which stored threads will break, and how? |
 | `with_migrations()` | your migrations | Repairs those threads as LangGraph reads them |
 
@@ -244,7 +245,8 @@ checkpoint was waiting for under the old layout with what the new graph would do
 - a trigger or barrier that no longer fits its channel class;
 - a stored value that fails the new schema;
 - an object whose class no longer imports. LangGraph restores these without an error, so `scan`
-  finds them by reading the stored bytes.
+  finds them by reading the stored bytes. It never imports anything the bytes name;
+  [SECURITY.md](SECURITY.md) has the details.
 
 It plans the next step as the run loop does, not as `get_state()` does. The two differ: the loop
 only considers nodes triggered by the checkpoint's `updated_channels`. A thread can therefore look
@@ -303,9 +305,38 @@ rewritten in place:
 - **Repairs are written through.** Checkpointers that store each channel separately (in-memory,
   Postgres) persist only what a step wrote. Without write-through, a repaired value the step didn't
   touch would be lost the next time the thread paused.
-- **Rollback is safe.** The old checkpoints are still there, unchanged.
+- **Memory is bounded.** The wrapper remembers a thread's repairs from its read until its next
+  write, for at most `max_tracked` threads (10,000 by default). LangGraph reads a thread right before
+  writing it, so a resumed thread is always tracked. A dashboard polling `get_state()` on every
+  thread costs nothing once those threads fall out.
+- **You can see it work.** `graph.checkpointer.stats` counts the reads each migration repaired, and
+  each repair is logged at DEBUG on the `graphlock` logger.
 - **`scan` says when a migration can go.** It counts the stored threads each migration still
   changes, and tells you when none are left.
+
+### Rolling back
+
+A rollback is a deploy too, in the other direction. The checkpoints written before your deploy are
+untouched, so the old code reads them as it always did. But a thread that moved on under the new
+code is stored in the new layout. For example, it may be paused at `manager_review`, which the old
+code doesn't have. `graphlock check --reverse` reports what a rollback to the locked version would
+break:
+
+```
+$ graphlock check --reverse
+Rollback check: what threads that ran on this code would hit if you rolled back to graphlock.json.
+Migrations don't run backwards; a repair for a rollback has to ship in the code you roll back to.
+
+refunds
+  ✗ GL101 node-removed  manager_review
+      Node 'manager_review' is gone. Threads paused at it, or with pending work for it, will resume
+      as if finished and it will never run.
+```
+
+To make a rename safe to roll back, expand before you contract:
+1. Deploy code that has both nodes but still routes to the old one.
+2. Switch the routing to the new node. Rolling back to step 1 is safe, because step 1 has both nodes.
+3. Remove the old node once `graphlock scan` shows no thread paused there.
 
 ## Evidence
 
@@ -348,9 +379,10 @@ Building the corpus corrected graphlock four times:
 
 - **The Functional API.** `@entrypoint` graphs have no builder to read, so graphlock reports them
   as unsupported.
-- **`interrupt()` in helper functions.** GL401 reads the node function's own source, so an
-  `interrupt()` in a function the node calls is not seen. Nodes whose source can't be read, such as
-  a lambda in the middle of a multi-line call, are skipped rather than guessed at.
+- **Every way of reaching `interrupt()`.** GL401 reads the node's source and follows calls to plain
+  functions the node can see, whether module globals or closure variables, two levels deep. Calls
+  through attributes (`self.ask()`, `approvals.ask()`) are not followed. Nodes whose source can't be
+  read, such as a lambda in the middle of a multi-line call, are skipped rather than guessed at.
 - **Renamed subgraph nodes.** A subgraph's checkpoints are stored under a namespace that contains
   the node name and a task id, so `rename_node` can't carry a thread paused inside one. `check` and
   `scan` report it; drain those threads before deploying.
@@ -370,7 +402,7 @@ Building the corpus corrected graphlock four times:
 
 ```sh
 uv sync
-uv run pytest                            # 167 tests, a few seconds
+uv run pytest                            # 181 tests, a few seconds
 uv run ruff check . && uv run mypy src   # strict
 uv run python scripts/evidence.py        # the table above, against the installed LangGraph
 ```

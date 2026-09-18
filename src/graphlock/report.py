@@ -32,8 +32,10 @@ def _wrap(text: str, indent: str, width: int = 100) -> str:
     return "\n".join(lines)
 
 
-def check_text(results: dict[str, list[Finding]], notes: Sequence[str] = ()) -> str:
-    out: list[str] = []
+def check_text(
+    results: dict[str, list[Finding]], notes: Sequence[str] = (), header: str | None = None
+) -> str:
+    out: list[str] = [_wrap(header, "") + "\n"] if header else []
     totals: Counter[str] = Counter()
     for graph, findings in results.items():
         out.append(f"{graph}")
@@ -62,8 +64,11 @@ def check_text(results: dict[str, list[Finding]], notes: Sequence[str] = ()) -> 
     return "\n".join(out) + "\n"
 
 
-def check_json(results: dict[str, list[Finding]], notes: Sequence[str] = ()) -> str:
+def check_json(
+    results: dict[str, list[Finding]], notes: Sequence[str] = (), header: str | None = None
+) -> str:
     doc = {
+        "mode": "rollback" if header else "deploy",
         "graphs": {g: [f.to_json() for f in fs] for g, fs in results.items()},
         "notes": list(notes),
         "blocking": sum(f.blocking for fs in results.values() for f in fs),

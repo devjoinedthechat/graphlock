@@ -8,11 +8,22 @@ repaired when it's read, and the repair reaches storage with the next checkpoint
 that thread. Checkpointers that store each channel separately (in-memory, Postgres) only store the
 channels a step wrote, so the wrapper adds the repaired channels to that write; otherwise a repaired
 value that the step didn't touch would be dropped.
+
+The wrapper remembers which channels it repaired for each thread until that thread's next write.
+LangGraph always reads a thread right before writing it, so the memory needed is bounded by the
+threads in flight, not the threads stored: it keeps the `max_tracked` most recently read and forgets
+the rest. A thread that is only read, by a dashboard polling `get_state()` say, costs nothing once
+it falls out.
+
+Each repair is counted in `stats` (migration -> reads it repaired) and logged at DEBUG on the
+`graphlock` logger, so you can see migrations fire in production and tell when they stop.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
+from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 
@@ -21,16 +32,30 @@ from langchain_core.runnables import RunnableConfig
 from graphlock import _lg
 from graphlock.migrations import Migration, apply_migrations
 
+logger = logging.getLogger("graphlock")
+
+DEFAULT_MAX_TRACKED = 10_000
+
 
 class MigratingSaver(_lg.BaseCheckpointSaver):  # type: ignore[type-arg]
     """Wraps a checkpointer; checkpoints read through it are repaired by `migrations`."""
 
-    def __init__(self, inner: _lg.BaseCheckpointSaver, migrations: Sequence[Migration], graph: Any) -> None:  # type: ignore[type-arg]
+    def __init__(
+        self,
+        inner: _lg.BaseCheckpointSaver,  # type: ignore[type-arg]
+        migrations: Sequence[Migration],
+        graph: Any,
+        *,
+        max_tracked: int = DEFAULT_MAX_TRACKED,
+    ) -> None:
         # Deliberately no super().__init__(): serde and everything else belong to `inner`.
         self.inner = inner
         self.migrations = list(migrations)
         self.graph = graph
-        self._repaired: dict[tuple[str, str], set[str]] = {}  # (thread, ns) -> channels to write through
+        self.max_tracked = max_tracked
+        self.stats: Counter[str] = Counter()
+        # (thread, ns) -> channels to write through, least recently read first
+        self._repaired: OrderedDict[tuple[str, str], set[str]] = OrderedDict()
         self._lock = threading.Lock()
 
     @property  # type: ignore[override]
@@ -50,8 +75,14 @@ class MigratingSaver(_lg.BaseCheckpointSaver):  # type: ignore[type-arg]
             return None
         migrated, applied, changed = apply_migrations(saved, self.migrations, self.graph)
         if applied:
+            key = _key(saved.config)
             with self._lock:
-                self._repaired.setdefault(_key(saved.config), set()).update(changed)
+                self.stats.update(applied)
+                channels = self._repaired.pop(key, set())
+                self._repaired[key] = channels | changed
+                while len(self._repaired) > self.max_tracked:
+                    self._repaired.popitem(last=False)
+            logger.debug("repaired thread %s (ns %r) on read: %s", key[0], key[1], ", ".join(applied))
         return migrated  # type: ignore[no-any-return]
 
     def _write_through(self, config: RunnableConfig, checkpoint: Any, new_versions: Any) -> Any:
@@ -122,8 +153,13 @@ class MigratingSaver(_lg.BaseCheckpointSaver):  # type: ignore[type-arg]
         return self.inner.get_next_version(current, channel)
 
     def with_allowlist(self, extra_allowlist: Any) -> MigratingSaver:
-        clone = MigratingSaver(self.inner.with_allowlist(extra_allowlist), self.migrations, self.graph)
-        clone._repaired, clone._lock = self._repaired, self._lock
+        clone = MigratingSaver(
+            self.inner.with_allowlist(extra_allowlist),
+            self.migrations,
+            self.graph,
+            max_tracked=self.max_tracked,
+        )
+        clone._repaired, clone._lock, clone.stats = self._repaired, self._lock, self.stats
         return clone
 
     def __getattr__(self, name: str) -> Any:
@@ -158,16 +194,19 @@ def _key(config: Any) -> tuple[str, str]:
     return (str(conf.get("thread_id")), str(conf.get("checkpoint_ns", "")))
 
 
-def with_migrations(graph: Any, migrations: Sequence[Migration]) -> Any:
+def with_migrations(
+    graph: Any, migrations: Sequence[Migration], *, max_tracked: int = DEFAULT_MAX_TRACKED
+) -> Any:
     """Return `graph` with its checkpointer wrapped so stored threads are repaired on read.
 
     The graph must have been compiled with a checkpointer. Subgraphs that share the parent's
-    checkpointer (the default) are covered too.
+    checkpointer (the default) are covered too. `max_tracked` bounds how many threads' repairs are
+    remembered between a read and the thread's next write; see the module docstring.
     """
     saver = getattr(graph, "checkpointer", None)
     if not isinstance(saver, _lg.BaseCheckpointSaver):
         raise TypeError("with_migrations needs a graph compiled with a checkpointer instance")
     if isinstance(saver, MigratingSaver):
         saver = saver.inner
-    graph.checkpointer = MigratingSaver(saver, migrations, graph)
+    graph.checkpointer = MigratingSaver(saver, migrations, graph, max_tracked=max_tracked)
     return graph
