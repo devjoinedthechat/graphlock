@@ -330,7 +330,7 @@ class _Analysis:
         return self.issues
 
     def _check_stale_fields(self, ckpt: Any) -> None:
-        """Versions of state channels the new graph doesn't have break static breakpoints."""
+        """Versions of state channels the new graph doesn't have break interrupt_before breakpoints."""
         breakpoints = _breakpoints(self.graph)
         if not breakpoints:
             return
@@ -342,8 +342,9 @@ class _Analysis:
             self.value_issue(
                 "GL203",
                 channel,
-                f"Holds a value for removed field '{channel}'. At a breakpoint ({', '.join(breakpoints)}) "
-                "this thread will pause again on every resume and never get past it.",
+                f"Holds a value for removed field '{channel}'. At an interrupt_before breakpoint "
+                f"({', '.join(breakpoints)}) this thread will pause again on every resume and never get "
+                "past it, whether it is paused there now or reaches it later.",
             )
 
     def _expected_nodes(self, ckpt: Any, writes: Sequence[tuple[str, str, Any]]) -> tuple[set[str], set[str]]:
@@ -488,11 +489,9 @@ class _Analysis:
 
 
 def _breakpoints(graph: Any) -> list[str]:
-    names: list[str] = []
-    for attr in ("interrupt_before_nodes", "interrupt_after_nodes"):
-        value = getattr(graph, attr, None) or []
-        names += ["*"] if value == "*" else list(value)
-    return names
+    """The graph's interrupt_before breakpoints. interrupt_after never re-checks the stale channel."""
+    value = getattr(graph, "interrupt_before_nodes", None) or []
+    return ["*"] if value == "*" else list(value)
 
 
 def _repairers(issue: ThreadIssue, used: Sequence[Migration], path: str) -> tuple[str, ...]:

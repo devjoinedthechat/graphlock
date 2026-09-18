@@ -271,16 +271,43 @@ def ask_b(state: Any) -> dict[str, Any]:
     return {"log": [f"b:{interrupt('b?')}"]}
 
 
-def note_graph(schema: type, *, breakpoint: bool = True) -> Callable[[Any], Any]:
+def note_graph(schema: type, *, pause: str = "before") -> Callable[[Any], Any]:
+    """a writes `note` (in v1), then b. `pause`: "before" b, "after" a, or inside b's interrupt()."""
+
     def build(saver: Any) -> Any:
         b = StateGraph(schema)
         b.add_node("a", write_note if schema is NoteState else step("a"))
-        b.add_node("b", step("b") if breakpoint else ask_b)
+        b.add_node("b", ask_b if pause == "inside" else step("b"))
         b.add_edge(START, "a")
         b.add_edge("a", "b")
-        return b.compile(checkpointer=saver, interrupt_before=["b"] if breakpoint else None)
+        return b.compile(
+            checkpointer=saver,
+            interrupt_before=["b"] if pause == "before" else None,
+            interrupt_after=["a"] if pause == "after" else None,
+        )
 
     return build
+
+
+def note_then_breakpoint(schema: type) -> Callable[[Any], Any]:
+    """a writes `note` (in v1), b waits in interrupt(), and c has an interrupt_before breakpoint."""
+
+    def build(saver: Any) -> Any:
+        b = StateGraph(schema)
+        b.add_node("a", write_note if schema is NoteState else step("a"))
+        b.add_node("b", ask_b)
+        b.add_node("c", step("c"))
+        b.add_edge(START, "a")
+        b.add_edge("a", "b")
+        b.add_edge("b", "c")
+        return b.compile(checkpointer=saver, interrupt_before=["c"])
+
+    return build
+
+
+def resume_yes_then_continue(g: Any) -> Any:
+    g.invoke(Command(resume="yes"), CFG)  # answers b, then pauses before c
+    return g.invoke(None, CFG)
 
 
 def items_graph(schema: type) -> Callable[[Any], Any]:
@@ -665,8 +692,8 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         "field-removed-no-breakpoint",
         "Remove a state field while a thread waits in interrupt()",
-        note_graph(NoteState, breakpoint=False),
-        note_graph(NoNoteState, breakpoint=False),
+        note_graph(NoteState, pause="inside"),
+        note_graph(NoNoteState, pause="inside"),
         start_plain,
         resume_yes,
         lambda r: log_of(r) == ["a", "b:yes"],
@@ -674,6 +701,32 @@ SCENARIOS: list[Scenario] = [
         rule=None,
         scan=None,
         info="GL203",
+    ),
+    Scenario(
+        "field-removed-interrupt-after",
+        "Remove a state field while a thread is paused at an interrupt_after breakpoint",
+        note_graph(NoteState, pause="after"),
+        note_graph(NoNoteState, pause="after"),
+        start_plain,
+        resume_none,
+        lambda r: log_of(r) == ["a", "b"],
+        today=OK,
+        rule=None,
+        scan=None,
+        info="GL203",
+    ),
+    Scenario(
+        "field-removed-later-breakpoint",
+        "Remove a state field while a thread waits in interrupt() before a breakpoint",
+        note_then_breakpoint(NoteState),
+        note_then_breakpoint(NoNoteState),
+        start_plain,
+        resume_yes_then_continue,
+        lambda r: log_of(r) == ["a", "b:yes", "c"],
+        today=SILENT,
+        rule="GL203",
+        scan="GL203",
+        migrations=[gl.drop_field("note")],
     ),
     Scenario(
         "reducer-added",

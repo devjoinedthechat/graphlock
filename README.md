@@ -17,7 +17,7 @@
   <a href="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
-  <img src="https://img.shields.io/badge/tests-155-brightgreen" alt="155 tests">
+  <img src="https://img.shields.io/badge/tests-167-brightgreen" alt="167 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
@@ -132,9 +132,11 @@ LangGraph 1.2.11, `SqliteSaver`:
 | Add a node after the paused one | resumes correctly | — | — | — |
 | Remove a state field while a thread is paused at a breakpoint | **wrong result, no error** | GL203 | GL203 | `drop_field` ✓ |
 | Remove a state field while a thread waits in interrupt() | resumes correctly | (GL203) | — | — |
+| Remove a state field while a thread is paused at an interrupt_after breakpoint | resumes correctly | (GL203) | — | — |
+| Remove a state field while a thread waits in interrupt() before a breakpoint | **wrong result, no error** | GL203 | GL203 | `drop_field` ✓ |
 | Add a reducer to a state field | resumes correctly | (GL204) | — | — |
 
-Fifteen of the twenty-one changes break a paused thread, and **ten of those raise no error**:
+Sixteen of the twenty-three changes break a paused thread, and **eleven of those raise no error**:
 the thread finishes early, waits forever, or carries on with wrong data. A rule in parentheses is
 reported but doesn't fail the check. LangGraph 1.0.0 and 1.1.0 behave the same on every row.
 
@@ -146,8 +148,9 @@ Four of them are easy to walk into:
 - **Renaming a class** that state stores means old objects come back as plain dicts. The
   serializer catches the failed import and returns the object's fields, so the next node gets a
   dict where it expected an `Order`.
-- **Removing a state field** freezes threads paused at `interrupt_before` breakpoints. On resume,
-  LangGraph marks only the new graph's channels as seen by the breakpoint
+- **Removing a state field** freezes threads at `interrupt_before` breakpoints, whether they are
+  paused there at deploy time or reach one later. On resume, LangGraph marks only the new graph's
+  channels as seen by the breakpoint
   ([`_loop.py:948`](https://github.com/langchain-ai/langgraph/blob/daa514a98863fbe555aeb8a8c7255fc48d06e037/libs/langgraph/langgraph/pregel/_loop.py#L948)).
   But it checks every channel stored in the checkpoint
   ([`_algo.py:155`](https://github.com/langchain-ai/langgraph/blob/daa514a98863fbe555aeb8a8c7255fc48d06e037/libs/langgraph/langgraph/pregel/_algo.py#L155)),
@@ -262,7 +265,7 @@ only matter if the thread is continued.
 | GL104 | subgraph-changed | Paused inside a node that stopped or started being a subgraph: loses the subgraph's state |
 | GL201 | required-field-added | No stored value, so validation fails at the next node |
 | GL202 | field-type-changed | Pydantic state fails validation at the next node; other state passes the old type on |
-| GL203 | field-removed | At an `interrupt_before`/`interrupt_after` breakpoint the thread pauses again forever. Silent |
+| GL203 | field-removed | At an `interrupt_before` breakpoint, now or later, the thread pauses again forever. Silent |
 | GL204 | reducer-changed | The stored value is kept, and merged with the new reducer from the next write |
 | GL205 | channel-kind-changed | The stored value restores into a channel that expects another shape |
 | GL301 | stored-class-missing | Stored objects restore as a plain dict or None. Silent |
@@ -270,7 +273,8 @@ only matter if the thread is continued.
 | GL402 | interrupting-node-changed | Paused inside the node: the new code runs from the top on resume |
 
 GL102 is informational when `defer` is turned off for a node with one predecessor, because pending
-triggers restore fine. GL203 is informational in a graph with no static breakpoints.
+triggers restore fine. GL203 is informational in a graph with no `interrupt_before` breakpoints;
+`interrupt_after` is not affected.
 
 ## Migrations
 
@@ -307,14 +311,14 @@ rewritten in place:
 
 graphlock rests on claims about what LangGraph does, so those claims are tests.
 
-[tests/corpus.py](tests/corpus.py) holds the 21 redeploy scenarios in the table above. Each pauses
+[tests/corpus.py](tests/corpus.py) holds the 23 redeploy scenarios in the table above. Each pauses
 a thread under one graph, deploys another and resumes. [tests/test_corpus.py](tests/test_corpus.py)
 checks four things for every scenario, against both `InMemorySaver` and `SqliteSaver`:
 
 | Test | Asserts |
 |---|---|
 | `test_what_langgraph_does_today` | What LangGraph does with no help. It fails if a LangGraph release fixes one of these, so the table can't go stale |
-| `test_check_reports_the_change` | `check` reports the right rule as blocking, and nothing blocking for the six safe changes |
+| `test_check_reports_the_change` | `check` reports the right rule as blocking, and nothing blocking for the seven safe changes |
 | `test_scan_reports_the_paused_thread` | `scan` reports the right rule for that thread, and for no other |
 | `test_migration_repairs_the_thread` | With the migration, the thread resumes correctly and `check` and `scan` mark the rule repaired. Once the thread moves on, nothing needs the migration any more |
 
@@ -325,7 +329,7 @@ The suite passes on LangGraph 1.0.0, 1.1.0 and 1.2.11, and on Python 3.10 to 3.1
 runs it against LangGraph 1.0.0 and the latest release, and writes the evidence table to the job
 summary.
 
-Building the corpus corrected graphlock three times:
+Building the corpus corrected graphlock four times:
 - **`get_state()` was the wrong oracle.** After `rename_node`, `get_state()` reported the thread as
   ready to run, but `invoke` did nothing. The run loop plans from the checkpoint's
   `updated_channels`, which still named the old channel. Migrations now rename it, and `scan`
@@ -334,8 +338,11 @@ Building the corpus corrected graphlock three times:
   thread paused a second time, because per-channel checkpointers store only what a step wrote.
   [tests/test_saver.py](tests/test_saver.py) shows the loss without write-through, and the fix.
 - **A change assumed safe wasn't.** Removing a state field looked harmless in a first probe, which
-  never checked the resumed result. The corpus showed that a thread paused at a static breakpoint
-  never gets past it.
+  never checked the resumed result. The corpus showed that a thread at an `interrupt_before`
+  breakpoint never gets past it.
+- **A rule was too broad.** GL203 first flagged `interrupt_after` breakpoints too. Testing it showed
+  they are unaffected, so the rule now blocks only on `interrupt_before`, and a scenario for each
+  pins the difference.
 
 ## What it does not do
 
@@ -363,7 +370,7 @@ Building the corpus corrected graphlock three times:
 
 ```sh
 uv sync
-uv run pytest                            # 155 tests, a few seconds
+uv run pytest                            # 167 tests, a few seconds
 uv run ruff check . && uv run mypy src   # strict
 uv run python scripts/evidence.py        # the table above, against the installed LangGraph
 ```

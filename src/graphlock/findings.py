@@ -85,10 +85,11 @@ RULES: dict[str, Rule] = {
             "field-removed",
             Severity.BREAKING,
             "The stored value stays in the checkpoint under a channel the graph no longer has. On resume "
-            "LangGraph marks only the new graph's channels as seen by the breakpoint check, so the removed "
-            "one always looks updated: a thread paused at an interrupt_before/interrupt_after breakpoint "
-            "pauses again on every resume and never gets past it. No error is raised. In a graph without "
-            "static breakpoints the value is simply no longer read.",
+            "LangGraph marks only the new graph's channels as seen by the interrupt_before check, so the "
+            "removed one always looks updated: a thread holding a value for it that is paused at an "
+            "interrupt_before breakpoint, or reaches one later, pauses again on every resume and never "
+            "gets past it. No error is raised. interrupt_after is not affected, and in a graph without "
+            "interrupt_before the value is simply no longer read.",
             "Add `drop_field(field)`.",
         ),
         Rule(

@@ -209,15 +209,15 @@ def _state(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
                 )
             )
 
-    breakpoints = new["interrupt_before"] + new["interrupt_after"]
+    breakpoints = new["interrupt_before"]  # interrupt_after is not affected: see GL203
     for name, field in old_fields.items():
         after = new_fields.get(name)
         if after is None:
             if breakpoints:
                 message = (
-                    f"State field '{name}' was removed. Threads with a stored value for it that pause at a "
-                    f"breakpoint ({', '.join(breakpoints)}) will pause again on every resume and never get "
-                    "past it."
+                    f"State field '{name}' was removed. Threads with a stored value for it that are paused "
+                    f"at, or later reach, an interrupt_before breakpoint ({', '.join(breakpoints)}) will "
+                    "pause again on every resume and never get past it."
                 )
             else:
                 message = f"State field '{name}' was removed. Stored values stay in the checkpoint unread."
