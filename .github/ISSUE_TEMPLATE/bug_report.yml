@@ -1,0 +1,30 @@
+name: Bug report
+description: graphlock crashes, reports something wrong, or behaves differently from the README.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: The command or code, and the graph if it matters.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or traceback
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "graphlock main@abc1234, langgraph 1.2.11, Python 3.12"
+    validations:
+      required: true

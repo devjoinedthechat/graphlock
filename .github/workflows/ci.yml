@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked
+      - run: uv run ruff format --check src tests scripts examples
+      - run: uv run ruff check src tests scripts examples
+      - run: uv run mypy src
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.14"]
+        langgraph: ["1.0.0", "latest"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - name: Test against LangGraph ${{ matrix.langgraph }}
+        run: |
+          if [ "${{ matrix.langgraph }}" = "latest" ]; then pin="langgraph"; else pin="langgraph==${{ matrix.langgraph }}"; fi
+          uv run --isolated -p ${{ matrix.python }} --with "$pin" --with langgraph-checkpoint-sqlite --with pytest --with-editable . pytest -q
+      - name: Evidence table (what LangGraph does today)
+        if: matrix.langgraph == 'latest' && matrix.python == '3.12'
+        run: uv run --isolated -p 3.12 --with langgraph --with langgraph-checkpoint-sqlite --with-editable . python scripts/evidence.py >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,44 @@
+name: A change graphlock missed
+description: A deploy broke, crashed or corrupted paused threads, and check or scan said nothing.
+labels: ["missed-break"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        The most valuable report this project can get. If the thread failed silently rather than
+        with an error, consider a [private advisory](https://github.com/devjoinedthechat/graphlock/security/advisories/new)
+        instead, since someone may be deploying on that green check.
+  - type: textarea
+    id: v1
+    attributes:
+      label: The graph before the change
+      description: The smallest graph that shows it. A StateGraph built in a few lines is ideal.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: v2
+    attributes:
+      label: The graph after the change
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How the thread was paused and resumed
+      description: For example, "invoke({...}) pauses before review; after the deploy, invoke(None) returns without running it."
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What graphlock check and scan printed
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "graphlock main@abc1234, langgraph 1.2.11, langgraph-checkpoint-postgres 3.1.2, Python 3.12"
+    validations:
+      required: true

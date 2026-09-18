@@ -1,0 +1,7 @@
+# Only the graphlock settings: this folder is an example, not a package.
+[tool.graphlock]
+lockfile = "graphlock.json"
+migrations = "migrations:MIGRATIONS"
+
+[tool.graphlock.graphs]
+refunds = "refunds_v2:graph"

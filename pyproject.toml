@@ -1,0 +1,78 @@
+[project]
+name = "graphlock"
+version = "0.1.0.dev0"
+description = "Catch LangGraph changes that break paused threads before you deploy them, and migrate the threads that are already stored."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "devjoinedthechat", email = "235875317+devjoinedthechat@users.noreply.github.com" }]
+requires-python = ">=3.10"
+keywords = ["langgraph", "checkpoint", "migration", "ai-agents", "human-in-the-loop", "ci", "backward-compatibility"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "langgraph>=1.0,<2",
+    "ormsgpack>=1.5",
+    "tomli>=2; python_version < '3.11'",
+    "typing-extensions>=4.7",
+    "xxhash>=3.5",
+]
+
+[project.scripts]
+graphlock = "graphlock.cli:main"
+
+[project.urls]
+Repository = "https://github.com/devjoinedthechat/graphlock"
+
+[build-system]
+requires = ["uv_build>=0.12.16,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "langgraph-checkpoint-sqlite>=3.0",
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "ruff>=0.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "-p", "no:cacheprovider"]
+filterwarnings = [
+    # LangGraph warns once per unregistered type it deserializes; the corpus stores such types on purpose
+    "ignore:Deserializing unregistered type:UserWarning",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL", "TRY", "C4", "PT", "RET", "ARG"]
+ignore = [
+    "PLR0911",  # rule functions return early per case; splitting them hides the rule
+    "PLR0912",
+    "PLR0913",
+    "PLR2004",
+    "TRY003",   # messages are read by the person fixing the deploy; long ones are the point
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "ARG001", "ARG002", "ARG005", "PT018", "S102", "S603"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+warn_unused_ignores = false
