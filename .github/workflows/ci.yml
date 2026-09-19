@@ -9,7 +9,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked
       - run: uv run ruff format --check src tests scripts examples
@@ -35,7 +35,7 @@ jobs:
         python: ["3.10", "3.12", "3.14"]
         langgraph: ["1.0.0", "latest"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - name: Test against LangGraph ${{ matrix.langgraph }}
         run: |
@@ -49,7 +49,7 @@ jobs:
     # The Action on the refund example: lock the deployed graph, then check the pull request's.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
