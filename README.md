@@ -17,7 +17,7 @@
   <a href="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
-  <img src="https://img.shields.io/badge/tests-345-brightgreen" alt="345 tests">
+  <img src="https://img.shields.io/badge/tests-346-brightgreen" alt="346 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
@@ -191,13 +191,34 @@ graphlock lock
 ```
 
 **3. Check every pull request.** `check` needs no database, and exits 1 when a change would break
-stored threads that no migration repairs:
+stored threads that no migration repairs. With the GitHub Action, findings appear as annotations on
+the pull request:
 
 ```yaml
 # .github/workflows/graphlock.yml
-- run: pip install -e . "graphlock @ git+https://github.com/devjoinedthechat/graphlock"
-- run: graphlock check --format github   # annotations on the pull request, then the text report
+on: pull_request
+jobs:
+  graphlock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: devjoinedthechat/graphlock@main
+        with:
+          python-version: "3.12"
+          install: pip install -e .     # whatever makes your graphs importable
 ```
+
+Or as a [pre-commit](https://pre-commit.com) hook, in the environment your graphs run in:
+
+```yaml
+- repo: https://github.com/devjoinedthechat/graphlock
+  rev: main
+  hooks:
+    - id: graphlock-check
+```
+
+When staging runs ahead of production, give each environment its own lockfile with
+`--lockfile graphlock.staging.json`.
 
 **4. Before deploying, scan the real threads.** `scan` reads the checkpointer and changes
 nothing:
@@ -446,7 +467,10 @@ fixed, and pinned in the corpus:
 The suite runs 100 examples per property. `HYPOTHESIS_PROFILE=deep` runs 3,000; the last deep run
 passed all 12,000. The harness runs one task at a time (`max_concurrency=1`). With LangGraph's
 default concurrency, which parallel tasks finish before an interrupt varies from run to run, and a
-failing example can't be replayed.
+failing example can't be replayed. About 27,000 examples at default concurrency produced one failure
+of the first property. Replayed, the same example passed, and a search built to catch it again, with
+the stored state saved, found nothing in 24,000 more. It is recorded here as unexplained, not as
+ruled out.
 
 ## Scale
 
@@ -495,7 +519,7 @@ path; `list()` fetches every checkpoint first.
 
 ```sh
 uv sync
-uv run pytest                            # 345 tests, about twenty seconds with Postgres
+uv run pytest                            # 346 tests, about twenty seconds with Postgres
 uv run ruff check . && uv run mypy src   # strict
 uv run python scripts/evidence.py        # the table above, against the installed LangGraph
 uv run python scripts/bench_scan.py      # the Scale table (add --postgres URL for Postgres)

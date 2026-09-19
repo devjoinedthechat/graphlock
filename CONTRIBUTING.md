@@ -60,14 +60,20 @@ uv run --isolated --with "langgraph==1.0.0" --with langgraph-checkpoint-sqlite -
 - **Comments say why.** Most lines here protect against one specific thing LangGraph does. Name
   it.
 
+## Releasing
+
+Bump `version` in `pyproject.toml`, add the release to `CHANGELOG.md`, and push a tag `vX.Y.Z` that
+matches it. [.github/workflows/release.yml](.github/workflows/release.yml) builds, checks and
+publishes to PyPI through trusted publishing, so no token is stored. The repository and its `pypi`
+environment have to be registered as a trusted publisher on PyPI first.
+
 ## Things that would help
 
 - **Carrying threads across a subgraph rename.** The subgraph's checkpoints live under a namespace
   built from the node name and a task id.
 - **`interrupt()` calls reached through attributes** (`self.ask()`), for GL401. Plain helper
   functions are already followed.
-- **Postgres in CI**, next to the in-memory and SQLite checkpointers.
-- **A GitHub Action** wrapping `graphlock check --format github`.
+- **More checkpointers for the one-query path** in `src/graphlock/_stores.py` (Redis, MongoDB).
 - **The Functional API** (`@entrypoint`).
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).

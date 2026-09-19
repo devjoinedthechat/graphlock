@@ -44,3 +44,22 @@ jobs:
       - name: Evidence table (what LangGraph does today)
         if: matrix.langgraph == 'latest' && matrix.python == '3.12'
         run: uv run --isolated -p 3.12 --with langgraph --with langgraph-checkpoint-sqlite --with-editable . python scripts/evidence.py >> "$GITHUB_STEP_SUMMARY"
+
+  action:
+    # The Action on the refund example: lock the deployed graph, then check the pull request's.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: ./
+        with:
+          working-directory: examples/refunds
+          install: pip install langgraph-checkpoint-sqlite
+          args: lock --graph refunds=refunds_v1:graph
+      - uses: ./
+        with:
+          working-directory: examples/refunds
+          install: ""
+          args: check --format github

@@ -76,8 +76,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Postgres and aiosqlite are optional test dependencies, imported where they're used.
 "tests/**" = ["S101", "PLR2004", "ARG001", "ARG002", "ARG005", "PT018", "S102", "S603", "S607", "PLC0415"]
-# SQL in the benchmark is built from fixed table and column names read from the schema.
-"scripts/**" = ["S608", "PLC0415"]
+# The benchmark builds SQL from table and column names read from the schema; the history replay runs
+# git, uv and python on repositories you point it at.
+"scripts/**" = ["S603", "S607", "S608", "PLC0415"]
 
 [tool.mypy]
 strict = true

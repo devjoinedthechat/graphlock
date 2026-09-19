@@ -164,3 +164,13 @@ def test_reverse_reports_what_a_rollback_would_break(
 
 def test_rollback_to_the_same_code_is_clean(project: Path) -> None:
     assert main(["check", "--reverse", "--graph", "refunds=refunds_v1:graph"]) == EXIT_OK
+
+
+def test_lockfile_per_environment(project: Path) -> None:
+    """Staging runs ahead of production: each has its own lockfile."""
+    assert (
+        main(["lock", "--graph", "refunds=refunds_v2:graph", "--lockfile", "graphlock.staging.json"])
+        == EXIT_OK
+    )
+    assert main(["check", "--lockfile", "graphlock.staging.json", "--no-migrations"]) == EXIT_OK
+    assert main(["check", "--no-migrations"]) == EXIT_BREAKING  # production still runs v1

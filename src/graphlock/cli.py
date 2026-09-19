@@ -12,7 +12,14 @@ from pathlib import Path
 from graphlock import lockfile, report
 from graphlock.check import check, check_rollback
 from graphlock.findings import Finding, Severity
-from graphlock.loader import ConfigError, load_config, load_graph, load_migrations, open_checkpointer
+from graphlock.loader import (
+    Config,
+    ConfigError,
+    load_config,
+    load_graph,
+    load_migrations,
+    open_checkpointer,
+)
 from graphlock.scan import scan
 from graphlock.shape import extract_shape
 
@@ -35,6 +42,12 @@ def _parser() -> argparse.ArgumentParser:
             help="a graph to use (repeatable); overrides [tool.graphlock.graphs] in pyproject.toml",
         )
         p.add_argument("--root", type=Path, default=None, help="project root (default: current directory)")
+        p.add_argument(
+            "--lockfile",
+            type=Path,
+            default=None,
+            help="the lockfile to use, e.g. one per environment (default: [tool.graphlock] lockfile)",
+        )
 
     def migrations(p: argparse.ArgumentParser) -> None:
         group = p.add_mutually_exclusive_group()
@@ -100,7 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "scan":
             return _scan(args)
         if args.command == "show":
-            config = load_config(args.root, args.graph)
+            config = _config(args)
             shapes = {n: extract_shape(load_graph(p, config.root)) for n, p in config.graphs.items()}
             sys.stdout.write(json.dumps(shapes, indent=2) + "\n")
             return EXIT_OK
@@ -108,6 +121,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"graphlock: {exc}\n")
         return EXIT_ERROR
     return EXIT_ERROR  # pragma: no cover - argparse requires a command
+
+
+def _config(args: argparse.Namespace) -> Config:
+    config = load_config(args.root, args.graph)
+    if getattr(args, "lockfile", None) is not None:
+        config.lockfile = args.lockfile if args.lockfile.is_absolute() else config.root / args.lockfile
+    return config
 
 
 def _progress(name: str) -> Callable[[int, int], None]:
@@ -128,7 +148,7 @@ def _migrations_path(args: argparse.Namespace, configured: str | None) -> str | 
 
 
 def _lock(args: argparse.Namespace) -> int:
-    config = load_config(args.root, args.graph)
+    config = _config(args)
     shapes = {name: extract_shape(load_graph(path, config.root)) for name, path in config.graphs.items()}
     lockfile.write(config.lockfile, shapes)
     names = ", ".join(sorted(shapes))
@@ -137,7 +157,7 @@ def _lock(args: argparse.Namespace) -> int:
 
 
 def _check(args: argparse.Namespace) -> int:
-    config = load_config(args.root, args.graph)
+    config = _config(args)
     if not config.lockfile.exists():
         raise ConfigError(
             f"{config.lockfile.name} not found. Run `graphlock lock` on the code that is deployed now, "
@@ -184,7 +204,7 @@ def _check(args: argparse.Namespace) -> int:
 
 
 def _scan(args: argparse.Namespace) -> int:
-    config = load_config(args.root, args.graph)
+    config = _config(args)
     locked = {}
     if not args.no_lock and config.lockfile.exists():
         with contextlib.suppress(ValueError):

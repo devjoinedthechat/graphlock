@@ -1,0 +1,8 @@
+- id: graphlock-check
+  name: graphlock check
+  description: Fail when a graph change would break paused LangGraph threads.
+  entry: graphlock check
+  # Your graphs must import, so the hook runs in your environment: install graphlock there.
+  language: system
+  pass_filenames: false
+  files: \.(py|json|toml)$

@@ -1,0 +1,43 @@
+name: graphlock
+description: Fail a pull request whose LangGraph changes would break paused threads, with annotations on the diff.
+author: devjoinedthechat
+branding:
+  icon: lock
+  color: blue
+
+inputs:
+  args:
+    description: Arguments to `graphlock`. The default checks against graphlock.json and annotates the pull request.
+    default: check --format github
+  install:
+    description: A command that installs your project, so its graphs import. Empty to skip.
+    default: pip install -e .
+  working-directory:
+    description: Where your pyproject.toml is.
+    default: "."
+  python-version:
+    description: Set up this Python first. Empty to use the runner's.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.python-version != ''
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install your project and graphlock
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INSTALL: ${{ inputs.install }}
+        GRAPHLOCK: ${{ github.action_path }}
+      run: |
+        if [ -n "$INSTALL" ]; then eval "$INSTALL"; fi
+        python -m pip install "$GRAPHLOCK"
+    - name: graphlock
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ARGS: ${{ inputs.args }}
+      run: graphlock $ARGS
