@@ -96,8 +96,11 @@ RULES: dict[str, Rule] = {
             "GL204",
             "reducer-changed",
             Severity.WARNING,
-            "The stored value is kept, but the next write to it is merged with the new reducer.",
-            "Check that the stored values make sense under the new reducer.",
+            "The stored value is kept, but the next write to it is merged with the new reducer. When the "
+            "type changed too, a stored value of the old type can make that write raise: "
+            "operator.add('text', ['more']) is a TypeError. That case is breaking.",
+            "Check that the stored values make sense under the new reducer, or add "
+            "`convert_field(field, fn)`.",
         ),
         Rule(
             "GL205",
@@ -119,8 +122,10 @@ RULES: dict[str, Rule] = {
             "interrupt-order-changed",
             Severity.BREAKING,
             "A thread paused inside the node resumes by running the node again from the top and handing "
-            "its stored answers to the `interrupt()` calls in order. When the calls are reordered or one "
-            "is inserted before another, answers go to the wrong questions. No error is raised.",
+            "its stored answers to the `interrupt()` calls by position. When a call moves (reordered, or "
+            "one inserted or removed before it), answers go to the wrong questions, with no error. When a "
+            "call is removed from the end, the node runs on without it and the waiting answer is dropped "
+            "(a warning). Reworded prompts at the same positions are fine (GL402).",
             "Keep existing `interrupt()` calls in their order and add new ones after them, or drain the "
             "threads paused inside the node.",
         ),
@@ -129,7 +134,8 @@ RULES: dict[str, Rule] = {
             "interrupting-node-changed",
             Severity.INFO,
             "A thread paused inside the node will run the new code from the top when it resumes, "
-            "including anything before the `interrupt()` call it is waiting on.",
+            "including anything before the `interrupt()` call it is waiting on. Stored answers still go to "
+            "the calls at the same positions, so reworded prompts are safe.",
             "Make sure the code before the `interrupt()` is safe to run again.",
         ),
     ]

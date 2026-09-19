@@ -483,7 +483,7 @@ class convert_field(Migration):
     def handles(self, finding: Finding) -> bool:
         return (
             finding.graph == self.graph
-            and finding.code in {"GL202", "GL205"}
+            and finding.code in {"GL202", "GL204", "GL205"}
             and finding.subject == self.field
         )
 

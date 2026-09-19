@@ -42,9 +42,12 @@ def prepare(url: str, work: Path) -> tuple[Path, Path]:
 
 
 def commits(clone: Path, limit: int | None) -> list[tuple[str, str, str]]:
+    # --first-parent: the mainline, one commit after another as they were deployed. Without it,
+    # commits of merged branches interleave, and "consecutive" commits are not parent and child.
     log = run(
         "git",
         "log",
+        "--first-parent",
         "--reverse",
         "--format=%H%x09%ad%x09%s",
         "--date=short",
@@ -76,6 +79,31 @@ def shapes_at(clone: Path, python: Path, sha: str) -> dict[str, Any]:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+def diff(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """What changed between two shapes, in words, for reviewing changes `check` stays quiet about."""
+    out = []
+    pairs = (("node", old["nodes"], new["nodes"]), ("field", old["state"]["fields"], new["state"]["fields"]))
+    for kind, a, b in pairs:
+        out += [f"{kind} added: {n}" for n in sorted(set(b) - set(a))]
+        out += [f"{kind} removed: {n}" for n in sorted(set(a) - set(b))]
+    for name in sorted(set(old["nodes"]) & set(new["nodes"])):
+        o, n = old["nodes"][name], new["nodes"][name]
+        if o.get("code") != n.get("code"):
+            out.append(f"code changed: {name}" + (" (calls interrupt)" if n.get("interrupts") else ""))
+        if o.get("triggers") != n.get("triggers"):
+            out.append(f"triggers changed: {name}")
+        if o.get("subgraph") != n.get("subgraph"):
+            out.append(f"subgraph changed: {name}")
+    for name in sorted(set(old["state"]["fields"]) & set(new["state"]["fields"])):
+        if old["state"]["fields"][name] != new["state"]["fields"][name]:
+            out.append(f"field changed: {name}")
+    if old["types"] != new["types"]:
+        out.append("stored classes changed")
+    if not out and old["channels"] != new["channels"]:
+        out.append("channels changed")
+    return out or ["other: breakpoints"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("url")
@@ -105,6 +133,7 @@ def main() -> None:
                     "to": sha[:10],
                     "date": date,
                     "subject": subject,
+                    "diff": diff(previous[1], shape),
                     "findings": [f.to_json() for f in findings],
                 }
             )

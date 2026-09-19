@@ -189,6 +189,10 @@ def type_name(tp: Any) -> str:
         return tp.__name__
     if isinstance(tp, str):
         return tp
+    if not isinstance(tp, type) and not hasattr(tp, "__origin__") and callable(getattr(tp, "invoke", None)):
+        # Not a type at all (a LangChain tool used as an annotation, say): name it stably, not by repr.
+        name = getattr(tp, "name", None)
+        return f"{type(tp).__name__}[{name}]" if isinstance(name, str) else type(tp).__name__
     return _plain_name(tp)
 
 

@@ -21,6 +21,7 @@ import ormsgpack
 from pydantic import TypeAdapter, ValidationError
 
 from graphlock import _lg, _stores
+from graphlock.check import interrupt_change
 from graphlock.findings import RULES, Finding, Severity
 from graphlock.migrations import Migration, apply_migrations, graph_for_ns
 from graphlock.saver import MigratingSaver
@@ -684,7 +685,27 @@ class _Analysis:
             )
         return True
 
+    def _check_reducers(self, values: dict[str, Any]) -> None:
+        """Would the new reducer accept the stored value? Tried with an empty update of the new type."""
+        for name, spec in self.graph.builder.channels.items():
+            if name not in values or not isinstance(spec, _lg.BinaryOperatorAggregate):
+                continue
+            empty = spec.from_checkpoint(_lg.MISSING).value  # the reducer's own starting value, e.g. []
+            if empty is _lg.MISSING:
+                continue
+            try:
+                spec.operator(values[name], empty)
+            except Exception as exc:
+                self.value_issue(
+                    "GL204",
+                    name,
+                    f"State field '{name}' holds {type(values[name]).__name__} {_short(values[name], 60)}, "
+                    f"which the new reducer can't merge: {_short(exc)}. The next write to it raises.",
+                    severity=Severity.BREAKING,
+                )
+
     def _check_values(self, values: dict[str, Any]) -> None:
+        self._check_reducers(values)
         schema = self.graph.builder.state_schema
         fields = {k: v for k, v in values.items() if k in self.graph.builder.channels}
         if hasattr(schema, "model_validate"):
@@ -738,7 +759,7 @@ class _Analysis:
             if not old_sites or new_node is None:
                 continue
             new_sites = new_node.get("interrupts")
-            if new_sites is None or new_sites[: len(old_sites)] == old_sites:
+            if new_sites is None or interrupt_change(old_sites, new_sites) != "moved":
                 continue
             task_id = _lg.pull_task_id(ckpt, self.ns, step, name, self.graph.nodes[name].triggers)
             if task_id in waiting:

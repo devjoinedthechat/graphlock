@@ -85,3 +85,23 @@ def test_digest_ignores_formatting_comments_and_name(tmp_path: Path, monkeypatch
     assert code_digest(a) is not None
     assert code_digest(a) == code_digest(b)
     assert code_digest(a) != code_digest(c)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "change"),
+    [
+        (["a", "b"], ["b", "a"], "moved"),  # swapped: answers go to the wrong calls
+        (["a"], ["x", "a"], "moved"),  # inserted before
+        (["a", "b"], ["b"], "moved"),  # the first removed: b now receives a's answer
+        (["a", "b"], ["a"], "removed"),  # the last removed: its answer is dropped
+        (["a"], [], "removed"),
+        (["a"], ["a", "b"], "appended"),
+        (["a"], ["a"], "same"),
+        (["ask(x)"], ["ask(y)"], "reworded"),  # one prompt, new wording: the answer still fits
+        (["a", "b"], ["a2", "b2"], "reworded"),
+    ],
+)
+def test_interrupt_change(old: list[str], new: list[str], change: str) -> None:
+    from graphlock.check import interrupt_change
+
+    assert interrupt_change(old, new) == change

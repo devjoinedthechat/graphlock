@@ -17,7 +17,7 @@
   <a href="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
-  <img src="https://img.shields.io/badge/tests-346-brightgreen" alt="346 tests">
+  <img src="https://img.shields.io/badge/tests-372-brightgreen" alt="372 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
@@ -131,8 +131,10 @@ LangGraph 1.2.11, `SqliteSaver`:
 | List a fan-in's sources in another order while a finished source's write is still pending | **wrong result, no error** | GL103 | GL103 | `rename_channel` ✓ |
 | Add a required field to Pydantic state | crashes on resume | GL201 | GL201 | `set_default` ✓ |
 | Change a Pydantic state field from str to int | crashes on resume | GL202 | GL202 | `convert_field` ✓ |
+| Turn a text field into a list with an operator.add reducer (seen in [open_deep_research@6035b16](https://github.com/langchain-ai/open_deep_research/commit/6035b16)) | crashes on resume | GL204 | GL204 | `convert_field` ✓ |
 | Rename a class whose objects are stored in state | **wrong result, no error** | GL301 | GL301 | `revive` ✓ |
 | Swap two interrupt() calls while a thread sits between them | **wrong result, no error** | GL401 | GL401 | — |
+| Reword two interrupt() prompts while a thread sits between them | resumes correctly | (GL402) | — | — |
 | Add a new interrupt() after the existing ones | resumes correctly | (GL402) | — | — |
 | Point the edge out of the paused node somewhere else | resumes correctly | — | — | — |
 | Add a node after the paused one | resumes correctly | — | — | — |
@@ -142,7 +144,7 @@ LangGraph 1.2.11, `SqliteSaver`:
 | Remove a state field while a thread waits in interrupt() before a breakpoint | **wrong result, no error** | GL203 | GL203 | `drop_field` ✓ |
 | Add a reducer to a state field | resumes correctly | (GL204) | — | — |
 
-Twenty-one of the twenty-eight changes break a paused thread, and **sixteen of those raise no error**:
+Twenty-two of the thirty changes break a paused thread, and **sixteen of those raise no error**:
 the thread finishes early, waits forever, or carries on with wrong data. A rule in parentheses is
 reported but doesn't fail the check. LangGraph 1.0.0 and 1.1.0 behave the same on every row.
 
@@ -304,13 +306,13 @@ as `graphlock.scan()` and, for async checkpointers, `await graphlock.ascan()`.
 | GL103 | join-changed | A half-full fan-in is renamed and its target never runs. Silent |
 | GL104 | subgraph-changed | Paused inside a node that stopped or started being a subgraph: loses the subgraph's state |
 | GL201 | required-field-added | No stored value, so validation fails at the next node |
-| GL202 | field-type-changed | Pydantic state fails validation at the next node; other state passes the old type on |
+| GL202 | field-type-changed | Pydantic state fails validation at the next node; other state passes the old type on. A type that only widens is informational |
 | GL203 | field-removed | At an `interrupt_before` breakpoint, now or later, the thread pauses again forever. Silent |
-| GL204 | reducer-changed | The stored value is kept, and merged with the new reducer from the next write |
+| GL204 | reducer-changed | The stored value is merged with the new reducer from the next write. If the type changed too, that write can raise, which is breaking |
 | GL205 | channel-kind-changed | The stored value restores into a channel that expects another shape |
 | GL301 | stored-class-missing | Stored objects restore as a plain dict or None. Silent |
-| GL401 | interrupt-order-changed | Paused inside the node: stored answers go to the wrong `interrupt()` calls. Silent |
-| GL402 | interrupting-node-changed | Paused inside the node: the new code runs from the top on resume |
+| GL401 | interrupt-order-changed | Paused inside the node: a moved `interrupt()` call gets another call's answer (silent); a call removed from the end drops its answer (warning) |
+| GL402 | interrupting-node-changed | Paused inside the node: the new code runs from the top on resume. Reworded prompts keep their answers |
 
 GL203 is informational in a graph with no `interrupt_before` breakpoints; `interrupt_after` is not
 affected. `check` reports what *any* stored thread could hit. `scan` reports what each stored thread
@@ -387,14 +389,14 @@ To make a rename safe to roll back, expand before you contract:
 
 graphlock rests on claims about what LangGraph does, so those claims are tests.
 
-[tests/corpus.py](tests/corpus.py) holds the 28 redeploy scenarios in the table above. Each pauses
+[tests/corpus.py](tests/corpus.py) holds the 30 redeploy scenarios in the table above. Each pauses
 a thread under one graph, deploys another and resumes. [tests/test_corpus.py](tests/test_corpus.py)
 checks four things for every scenario, against `InMemorySaver`, `SqliteSaver` and `PostgresSaver`:
 
 | Test | Asserts |
 |---|---|
 | `test_what_langgraph_does_today` | What LangGraph does with no help. It fails if a LangGraph release fixes one of these, so the table can't go stale |
-| `test_check_reports_the_change` | `check` reports the right rule as blocking, and nothing blocking for the six changes no stored thread can trip over |
+| `test_check_reports_the_change` | `check` reports the right rule as blocking, and nothing blocking for the seven changes no stored thread can trip over |
 | `test_scan_reports_the_paused_thread` | `scan` reports the right rule for that thread, and for no other |
 | `test_migration_repairs_the_thread` | With the migration, the thread resumes correctly and `check` and `scan` mark the rule repaired. Once the thread moves on, nothing needs the migration any more |
 
@@ -432,6 +434,23 @@ Building the corpus corrected graphlock five times:
 - **Postgres doesn't overwrite.** Running the corpus on Postgres showed that a repair made in place is
   never persisted, because Postgres keeps the first value stored at a version. The docs now say so,
   and the tests assert what each checkpointer does.
+
+### On real apps
+
+[docs/real-world.md](docs/real-world.md) replays the git history of seven public LangGraph apps
+through `check`: open_deep_research, local-deep-researcher, company-researcher, react-agent,
+retrieval-agent-template, data-enrichment and memory-agent. Of 164 mainline commits, 120 still
+import. They change a graph's shape 59 times.
+
+`check` blocks 4 of those changes, and all 4 would have broken stored threads:
+- twice, stored Pydantic classes moved package;
+- once, a field became a list with an `operator.add` reducer, which crashes the next write;
+- once, a rewrite removed a node and added required fields.
+
+The other 55 are warnings, information, or nothing to report, and each is accounted for on that
+page. The review also fixed four false positives, where GL401 had flagged reworded `interrupt()`
+prompts, and one miss, the reducer crash. The script is
+[`scripts/history.py`](scripts/history.py).
 
 ### What the property tests found
 
@@ -505,7 +524,8 @@ path; `list()` fetches every checkpoint first.
   `check` and `scan` report it; drain those threads before deploying. Changes *inside* a subgraph
   are repaired like any others, with `graph="research"`.
 - **Breakpoints passed at call time.** `invoke(..., interrupt_before=[...])` isn't part of the
-  graph, so `check` can't see it. `scan` reads stored checkpoints and is unaffected.
+  graph. Neither `check` nor `scan` knows about it, so GL203 and the other stale-channel checks,
+  which depend on `interrupt_before`, only cover the graph's own breakpoints.
 - **Checkpointers you can't wrap.** `with_migrations` runs in your process. A platform that owns
   the checkpointer can still be locked, checked and scanned, but not migrated this way.
 - **Fast lookups for every store.** Checkpointers other than SQLite and Postgres are scanned
@@ -519,11 +539,12 @@ path; `list()` fetches every checkpoint first.
 
 ```sh
 uv sync
-uv run pytest                            # 346 tests, about twenty seconds with Postgres
+uv run pytest                            # 372 tests, about twenty seconds with Postgres
 uv run ruff check . && uv run mypy src   # strict
 uv run python scripts/evidence.py        # the table above, against the installed LangGraph
 uv run python scripts/bench_scan.py      # the Scale table (add --postgres URL for Postgres)
 HYPOTHESIS_PROFILE=deep uv run pytest tests/test_properties.py   # 12,000 random redeploys, ~10 minutes
+uv run python scripts/history.py https://github.com/langchain-ai/react-agent --workdir /tmp/gl   # a real app's history
 ```
 
 The layout:

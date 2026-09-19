@@ -150,29 +150,65 @@ def _defer_finding(name: str, new_node: NodeShape, old: GraphShape, path: str) -
     return Finding("GL102", name, message, graph=path)
 
 
+def interrupt_change(old: Sequence[str], new: Sequence[str]) -> str:
+    """How a node's `interrupt()` calls changed, as far as stored answers are concerned.
+
+    A paused thread's answers are handed to the calls by position. So what matters is whether a call
+    that was at position i is now somewhere else ("moved": answers go to the wrong calls), whether
+    calls were taken off the end ("removed": the node stops asking and the answer is dropped), and
+    otherwise nothing: new calls after the old ones ("appended") or new wording at the same positions
+    ("reworded") leave every stored answer with the call it was given for.
+    """
+    for i, site in enumerate(old):
+        if site in new and (i >= len(new) or new[i] != site):
+            return "moved"
+    if len(new) < len(old):
+        return "removed"
+    if list(new[: len(old)]) == list(old):
+        return "appended" if len(new) > len(old) else "same"
+    return "reworded"
+
+
 def _interrupts(name: str, node: NodeShape, new_node: NodeShape, path: str) -> list[Finding]:
     old_sites = node.get("interrupts")
     new_sites = new_node.get("interrupts")
     if not old_sites or new_sites is None:
         return []
-    if new_sites[: len(old_sites)] != old_sites:
+    change = interrupt_change(old_sites, new_sites)
+    if change == "moved":
         return [
             Finding(
                 "GL401",
                 name,
-                f"The interrupt() calls in '{name}' changed from {_list(old_sites)} to {_list(new_sites)}. "
+                f"The interrupt() calls in '{name}' moved: {_list(old_sites)} is now {_list(new_sites)}. "
                 "Threads paused inside it will pass stored answers to the wrong calls.",
                 graph=path,
                 hint="Keep existing interrupt() calls in order and add new ones after them.",
             )
         ]
-    if node.get("code") and new_node.get("code") and node.get("code") != new_node.get("code"):
+    if change == "removed":
+        return [
+            Finding(
+                "GL401",
+                name,
+                f"interrupt() calls were removed from '{name}': {_list(old_sites)} is now "
+                f"{_list(new_sites)}. A thread paused at a removed call runs the node again without it, and "
+                "the answer it was waiting for is dropped.",
+                graph=path,
+                severity=Severity.WARNING,
+            )
+        ]
+    code_changed = bool(
+        node.get("code") and new_node.get("code") and node.get("code") != new_node.get("code")
+    )
+    if change == "reworded" or code_changed:
+        what = "its interrupt() prompts were reworded" if change == "reworded" else "its code changed"
         return [
             Finding(
                 "GL402",
                 name,
-                f"'{name}' calls interrupt() and its code changed. Threads paused inside it will run "
-                "the new code from the top when they resume.",
+                f"'{name}' calls interrupt() and {what}. Stored answers still go to the calls at the same "
+                "positions, and threads paused inside it run the new code from the top when they resume.",
                 graph=path,
             )
         ]
@@ -260,6 +296,18 @@ def _state(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
             )
             continue
         if field["type"] != after["type"]:
+            if _widens(field["type"], after["type"]):
+                findings.append(
+                    Finding(
+                        "GL202",
+                        name,
+                        f"State field '{name}' widened from {field['type']} to {after['type']}. Every "
+                        "stored value still fits.",
+                        graph=path,
+                        severity=Severity.INFO,
+                    )
+                )
+                continue
             findings.append(
                 Finding(
                     "GL202",
@@ -295,6 +343,23 @@ def _state(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
         elif channel.get("reducer") != after_ch.get("reducer"):
             before_r = channel.get("reducer") or "none (last value wins)"
             after_r = after_ch.get("reducer") or "none (last value wins)"
+            retyped = after_ch.get("reducer") and channel.get("type") != after_ch.get("type")
+            if retyped:
+                # A stored value of the old type meets the new reducer at the next write:
+                # operator.add("text", ["more"]) raises TypeError.
+                findings.append(
+                    Finding(
+                        "GL204",
+                        name,
+                        f"State field '{name}' changed type ({channel.get('type')} to "
+                        f"{after_ch.get('type')}) and reducer ({before_r} to {after_r}). The next write "
+                        "merges a stored value of the old type with the new reducer, which can raise.",
+                        graph=path,
+                        severity=Severity.BREAKING,
+                        hint=f"Add convert_field({name!r}, fn) to convert stored values to the new type.",
+                    )
+                )
+                continue
             findings.append(
                 Finding(
                     "GL204",
@@ -305,6 +370,11 @@ def _state(old: GraphShape, new: GraphShape, path: str) -> list[Finding]:
                 )
             )
     return findings
+
+
+def _widens(old: str, new: str) -> bool:
+    """Whether `new` accepts everything `old` does, judged on union members: `bool` -> `None | bool`."""
+    return set(old.split(" | ")) < set(new.split(" | "))
 
 
 def _types(old: GraphShape, new: GraphShape, path: str, exists: Callable[[str], bool]) -> list[Finding]:

@@ -23,4 +23,9 @@ First version.
   LangGraph does. They found four silent failure classes and three kinds of false alarm, all now
   fixed and pinned in the corpus. Turning `defer` off is now breaking (GL102).
 - `redirect_node` and `drop_node` migrations for removed nodes.
+- Validated against the history of seven public LangGraph apps (`scripts/history.py`). That review
+  refined three rules: GL401 now tells a moved `interrupt()` call (breaking) from reworded prompts
+  (info) and calls removed from the end (warning); a type change together with a reducer change is
+  breaking (GL204), and `scan` tries the new reducer on each stored value; a type that only widens is
+  informational (GL202).
 - Tested against LangGraph 1.0.0, 1.1.0 and 1.2.11, and Python 3.10 to 3.14.

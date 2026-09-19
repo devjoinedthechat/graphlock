@@ -36,8 +36,12 @@ def run(sc: object, graph: object) -> str:
 
 
 def source_link(source: str) -> str:
+    """`langgraph#8629` links an issue; `open_deep_research@6035b16` links the commit that did it."""
     if not source:
         return ""
+    if "@" in source:
+        repo, _, sha = source.partition("@")
+        return f" (seen in [{source}](https://github.com/langchain-ai/{repo}/commit/{sha}))"
     repo, _, number = source.partition("#")
     return f" ([{source}](https://github.com/langchain-ai/{repo}/issues/{number}))"
 

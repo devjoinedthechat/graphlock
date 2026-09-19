@@ -397,6 +397,44 @@ def items_graph(schema: type) -> Callable[[Any], Any]:
     return build
 
 
+class FeedbackText(TypedDict, total=False):
+    log: Annotated[list[str], operator.add]
+    feedback: str
+
+
+class FeedbackList(TypedDict, total=False):
+    log: Annotated[list[str], operator.add]
+    feedback: Annotated[list[str], operator.add]
+
+
+def give_feedback(state: Any) -> dict[str, Any]:
+    return {"log": ["a"], "feedback": "looks good"}
+
+
+def more_feedback(state: Any) -> dict[str, Any]:
+    more = interrupt("anything else?")
+    return {"log": [f"more:{more}"], "feedback": [more]}
+
+
+def more_feedback_text(state: Any) -> dict[str, Any]:
+    more = interrupt("anything else?")
+    return {"log": [f"more:{more}"], "feedback": f"{state['feedback']}; {more}"}
+
+
+def feedback_graph(schema: type) -> Callable[[Any], Any]:
+    """a stores feedback; b asks for more and adds it (a str in v1, a list with a reducer in v2)."""
+
+    def build(saver: Any) -> Any:
+        b = StateGraph(schema)
+        b.add_node("a", give_feedback)
+        b.add_node("b", more_feedback_text if schema is FeedbackText else more_feedback)
+        b.add_edge(START, "a")
+        b.add_edge("a", "b")
+        return b.compile(checkpointer=saver)
+
+    return build
+
+
 # A class stored in state, renamed between deploys. It lives in a real module so checkpoints can
 # store it by import path, and "deploying v2" swaps that module's contents.
 MODELS = "graphlock_corpus_models"
@@ -460,6 +498,12 @@ def ask_amount_then_approver(state: Any) -> dict[str, Any]:
 def ask_approver_then_amount(state: Any) -> dict[str, Any]:
     approver = interrupt("approver?")
     amount = interrupt("amount?")
+    return {"log": [f"amount={amount}", f"approver={approver}"]}
+
+
+def ask_amount_then_approver_reworded(state: Any) -> dict[str, Any]:
+    amount = interrupt("How much should be refunded?")
+    approver = interrupt("Who approves this refund?")
     return {"log": [f"amount={amount}", f"approver={approver}"]}
 
 
@@ -754,6 +798,20 @@ SCENARIOS: list[Scenario] = [
         migrations=[gl.convert_field("ref", lambda v: int(str(v).removeprefix("PO-")))],
     ),
     Scenario(
+        "type-and-reducer-changed",
+        "Turn a text field into a list with an operator.add reducer",
+        feedback_graph(FeedbackText),
+        feedback_graph(FeedbackList),
+        start_plain,
+        resume_yes,
+        lambda r: r.get("feedback") == ["looks good", "yes"],
+        today=CRASH,
+        rule="GL204",
+        scan="GL204",
+        migrations=[gl.convert_field("feedback", lambda v: [v] if isinstance(v, str) else v)],
+        source="open_deep_research@6035b16",
+    ),
+    Scenario(
         "class-renamed",
         "Rename a class whose objects are stored in state",
         order_graph(1),
@@ -777,6 +835,19 @@ SCENARIOS: list[Scenario] = [
         today=SILENT,
         rule="GL401",
         scan="GL401",
+    ),
+    Scenario(
+        "interrupts-reworded",
+        "Reword two interrupt() prompts while a thread sits between them",
+        asks(ask_amount_then_approver),
+        asks(ask_amount_then_approver_reworded),
+        start_answer_amount,
+        resume_alice,
+        lambda r: sorted(log_of(r)) == ["amount=500", "approver=alice"],
+        today=OK,
+        rule=None,
+        scan=None,
+        info="GL402",
     ),
     Scenario(
         "interrupt-appended",
