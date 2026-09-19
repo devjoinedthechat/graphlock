@@ -10,16 +10,17 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import random
 import sys
 import typing
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 import ormsgpack
 from pydantic import TypeAdapter, ValidationError
 
-from graphlock import _lg
+from graphlock import _lg, _stores
 from graphlock.findings import RULES, Finding, Severity
 from graphlock.migrations import Migration, apply_migrations, graph_for_ns
 from graphlock.saver import MigratingSaver
@@ -70,6 +71,9 @@ class ScanReport:
     threads: int = 0
     paused: int = 0  # threads whose latest checkpoint has work left to do
     checkpoints: int = 0
+    stored_threads: int = 0  # threads that matched the filters, before sampling
+    foreign: int = 0  # threads skipped as another graph's: they mention none of its nodes, old or new
+    unrelated: int = 0  # without a lockfile: threads that mention none of the graph's current nodes
     issues: list[ThreadIssue] = dataclasses.field(default_factory=list)
     # migration -> stored threads it still changes, split by whether the thread is paused mid-run
     migrations_needed: dict[str, dict[str, int]] = dataclasses.field(default_factory=dict)
@@ -87,6 +91,9 @@ class ScanReport:
             "threads": self.threads,
             "paused": self.paused,
             "checkpoints": self.checkpoints,
+            "stored_threads": self.stored_threads,
+            "foreign": self.foreign,
+            "unrelated": self.unrelated,
             "affected_threads": len(self.affected_threads),
             "blocking": len(self.blocking),
             "issues": [i.to_json() for i in self.issues],
@@ -145,21 +152,167 @@ def _unwrap(saver: Any) -> Any:
     return saver.inner if isinstance(saver, MigratingSaver) else saver
 
 
-def _latest_checkpoints(
-    saver: Any, thread_ids: Iterable[str] | None
-) -> dict[tuple[str, str], dict[str, Any]]:
+@dataclasses.dataclass(frozen=True)
+class ThreadFilter:
+    """Which stored threads belong to the graph being scanned.
+
+    A store often holds the threads of several graphs. `where` matches checkpoint metadata, which
+    includes the `metadata` of the run config (`{"graph": "refunds"}`); `prefix` matches thread ids.
+    """
+
+    thread_ids: tuple[str, ...] | None = None
+    prefix: str | None = None
+    where: dict[str, Any] | None = None
+
+    def configs(self) -> list[dict[str, Any] | None]:
+        if self.thread_ids is None:
+            return [None]
+        return [{"configurable": {"thread_id": t}} for t in self.thread_ids]
+
+    def keeps(self, thread_id: str) -> bool:
+        return self.prefix is None or thread_id.startswith(self.prefix)
+
+
+def _track_latest(latest: dict[tuple[str, str], dict[str, Any]], saved: Any, filt: ThreadFilter) -> None:
+    conf = saved.config["configurable"]
+    if not filt.keeps(conf["thread_id"]):
+        return
+    key = (conf["thread_id"], conf.get("checkpoint_ns", ""))
+    if key not in latest or conf["checkpoint_id"] > latest[key]["configurable"]["checkpoint_id"]:
+        latest[key] = {"configurable": dict(conf)}
+
+
+def _latest_checkpoints(saver: Any, filt: ThreadFilter) -> dict[tuple[str, str], dict[str, Any]]:
     """(thread_id, checkpoint_ns) -> config of its latest checkpoint."""
+    fast = latest_from_store(saver, filt)
+    if fast is not None:
+        return fast
     latest: dict[tuple[str, str], dict[str, Any]] = {}
-    configs: Iterable[Any] = (
-        [None] if thread_ids is None else [{"configurable": {"thread_id": t}} for t in thread_ids]
-    )
-    for config in configs:
-        for saved in saver.list(config):
-            conf = saved.config["configurable"]
-            key = (conf["thread_id"], conf.get("checkpoint_ns", ""))
-            if key not in latest or conf["checkpoint_id"] > latest[key]["configurable"]["checkpoint_id"]:
-                latest[key] = {"configurable": dict(conf)}
+    for config in filt.configs():
+        for saved in saver.list(config, filter=filt.where):
+            _track_latest(latest, saved, filt)
     return latest
+
+
+async def _alatest_checkpoints(saver: Any, filt: ThreadFilter) -> dict[tuple[str, str], dict[str, Any]]:
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for config in filt.configs():
+        async for saved in saver.alist(config, filter=filt.where):
+            _track_latest(latest, saved, filt)
+    return latest
+
+
+def latest_from_store(saver: Any, filt: ThreadFilter) -> dict[tuple[str, str], dict[str, Any]] | None:
+    """A faster way to find each thread's latest checkpoint, for stores that offer one; else None."""
+    return _stores.latest_checkpoints(saver, filt)
+
+
+def _nodes_referenced(ckpt: Any) -> set[str]:
+    """The node names a stored checkpoint mentions: nodes that ran, and nodes it is waiting on."""
+    names = {n for n in ckpt["versions_seen"] if not n.startswith("__")}
+    for channel in set(ckpt["channel_versions"]) | set(ckpt["channel_values"]):
+        if channel.startswith(_lg.BRANCH_PREFIX):
+            names.add(channel[len(_lg.BRANCH_PREFIX) :])
+        elif (join := _lg.parse_join(channel)) is not None:
+            names.update(join[0])
+            names.add(join[1])
+    for send in ckpt["channel_values"].get(_lg.TASKS) or []:
+        if isinstance(send, _lg.Send):
+            names.add(send.node)
+    return names
+
+
+def _sampled(
+    latest: dict[tuple[str, str], dict[str, Any]], sample: int | None, seed: int
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """At most `sample` threads, chosen at random but reproducibly, with all their namespaces."""
+    threads = sorted({t for t, _ in latest})
+    if sample is None or len(threads) <= sample:
+        return latest
+    chosen = set(random.Random(seed).sample(threads, sample))  # noqa: S311 - a sample, not a secret
+    return {key: config for key, config in latest.items() if key[0] in chosen}
+
+
+class _Session:
+    """One scan: the checkpoints it reads, and the report it builds from them."""
+
+    def __init__(
+        self, graph: Any, saver: Any, migrations: Sequence[Migration], lock: GraphShape | None
+    ) -> None:
+        self.graph, self.saver, self.migrations = graph, saver, list(migrations)
+        self.locked = dict(iter_graphs(lock)) if lock is not None else {}
+        self.known_nodes = set(graph.nodes) | (set(lock["nodes"]) if lock is not None else set())
+        self.has_lock = lock is not None
+        self.report = ScanReport()
+        self.needed: dict[str, Counter[str]] = {
+            m.describe(): Counter(paused=0, finished=0) for m in self.migrations
+        }
+        self.foreign: set[str] = set()
+        self.recorder = _ClassRefRecorder(saver.serde)
+
+    def __enter__(self) -> _Session:
+        self._serde = self.saver.serde
+        self.saver.serde = self.recorder
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.saver.serde = self._serde
+
+    def add(self, thread_id: str, ns: str, saved: Any, refs: set[tuple[str, str]]) -> None:
+        if saved is None or thread_id in self.foreign:
+            return
+        if ns == "":
+            mentioned = _nodes_referenced(saved.checkpoint) - {_lg.START}
+            if mentioned and not mentioned & self.known_nodes:
+                if self.has_lock:
+                    self.foreign.add(thread_id)  # another graph's thread: none of its nodes are ours
+                    return
+                self.report.unrelated += 1
+        self.report.checkpoints += 1
+        sub, path = graph_for_ns(self.graph, ns)
+        analysis = _Analysis(thread_id, ns, path, sub, self.locked.get(path), self.saver)
+        raw = analysis.run(saved, refs)
+        if ns == "" and analysis.pending:
+            self.report.paused += 1
+        if ns and not analysis.pending:
+            return  # a finished subgraph run: nothing will resume it
+        if not self.migrations:
+            self.report.issues += raw
+            return
+        migrated, applied, _ = apply_migrations(saved, self.migrations, self.graph)
+        for name in applied:
+            self.needed[name]["paused" if analysis.pending else "finished"] += 1
+        if not applied:
+            self.report.issues += raw
+            return
+        used = [m for m in self.migrations if m.describe() in applied]
+        revived = {r for r in refs if any(m.handles(Finding("GL301", f"{r[0]}:{r[1]}", "")) for m in used)}
+        again = _Analysis(thread_id, ns, path, sub, self.locked.get(path), self.saver)
+        after = {i.key() for i in again.run(migrated, refs - revived)}
+        for issue in raw:
+            if issue.key() in after:
+                self.report.issues.append(issue)
+            else:
+                self.report.issues.append(
+                    dataclasses.replace(issue, handled_by=_repairers(issue, used, path))
+                )
+
+    def finish(self, latest: dict[tuple[str, str], Any], stored: int) -> ScanReport:
+        report = self.report
+        report.threads = len({t for t, _ in latest} - self.foreign)
+        report.stored_threads = stored
+        report.foreign = len(self.foreign)
+        report.migrations_needed = {name: dict(counts) for name, counts in self.needed.items()}
+        order = {Severity.BREAKING: 0, Severity.WARNING: 1, Severity.INFO: 2}
+        report.issues.sort(key=lambda i: (order[i.level], i.code, i.thread_id, i.subject))
+        return report
+
+
+def _prepare(graph: Any, saver: Any) -> Any:
+    saver = _unwrap(saver if saver is not None else graph.checkpointer)
+    if saver is None:
+        raise ValueError("scan needs a checkpointer: pass saver= or compile the graph with one")
+    return saver
 
 
 def scan(
@@ -169,67 +322,59 @@ def scan(
     migrations: Sequence[Migration] = (),
     lock: GraphShape | None = None,
     thread_ids: Iterable[str] | None = None,
+    thread_prefix: str | None = None,
+    where: dict[str, Any] | None = None,
+    sample: int | None = None,
+    seed: int = 0,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> ScanReport:
-    """Report what `graph` would do to every thread stored in `saver` (default: the graph's checkpointer)."""
-    saver = _unwrap(saver if saver is not None else graph.checkpointer)
-    if saver is None:
-        raise ValueError("scan needs a checkpointer: pass saver= or compile the graph with one")
-    locked = dict(iter_graphs(lock)) if lock is not None else {}
+    """Report what `graph` would do to every thread stored in `saver` (default: the graph's checkpointer).
 
-    report = ScanReport()
-    recorder = _ClassRefRecorder(saver.serde)
-    original_serde = saver.serde
-    saver.serde = recorder
-    try:
-        latest = _latest_checkpoints(saver, thread_ids)
-        report.threads = len({t for t, _ in latest})
-        needed: dict[str, Counter[str]] = {m.describe(): Counter(paused=0, finished=0) for m in migrations}
-        for (thread_id, ns), config in sorted(latest.items()):
-            recorder.take()
+    With `lock`, threads that mention none of the graph's nodes, old or new, are counted as another
+    graph's and skipped. `thread_ids`, `thread_prefix` and `where` (checkpoint metadata) narrow the
+    scan explicitly. `sample` scans at most that many threads, chosen reproducibly from `seed`.
+    `on_progress(done, total)` is called as checkpoints are read.
+    """
+    saver = _prepare(graph, saver)
+    filt = ThreadFilter(tuple(thread_ids) if thread_ids is not None else None, thread_prefix, where)
+    with _Session(graph, saver, migrations, lock) as session:
+        everything = _latest_checkpoints(saver, filt)
+        latest = _sampled(everything, sample, seed)
+        for done, ((thread_id, ns), config) in enumerate(sorted(latest.items()), start=1):
+            session.recorder.take()
             saved = saver.get_tuple(config)
-            refs = recorder.take()
-            if saved is None:
-                continue
-            report.checkpoints += 1
-            sub, path = graph_for_ns(graph, ns)
-            analysis = _Analysis(thread_id, ns, path, sub, locked.get(path), saver)
-            raw = analysis.run(saved, refs)
-            if ns == "" and analysis.pending:
-                report.paused += 1
-            if ns and not analysis.pending:
-                continue  # a finished subgraph run: nothing will resume it
-            if not migrations:
-                report.issues += raw
-                continue
-            migrated, applied, _ = apply_migrations(saved, migrations, graph)
-            for name in applied:
-                needed[name]["paused" if analysis.pending else "finished"] += 1
-            if not applied:
-                report.issues += raw
-                continue
-            used = [m for m in migrations if m.describe() in applied]
-            revived = {
-                r for r in refs if any(m.handles(Finding("GL301", f"{r[0]}:{r[1]}", "")) for m in used)
-            }
-            again = _Analysis(thread_id, ns, path, sub, locked.get(path), saver)
-            after = {i.key() for i in again.run(migrated, refs - revived)}
-            for issue in raw:
-                if issue.key() in after:
-                    report.issues.append(issue)
-                else:
-                    report.issues.append(dataclasses.replace(issue, handled_by=_repairers(issue, used, path)))
-        report.migrations_needed = {name: dict(counts) for name, counts in needed.items()}
-    finally:
-        saver.serde = original_serde
-    report.issues.sort(
-        key=lambda i: (
-            {Severity.BREAKING: 0, Severity.WARNING: 1, Severity.INFO: 2}[i.level],
-            i.code,
-            i.thread_id,
-            i.subject,
-        )
-    )
-    return report
+            session.add(thread_id, ns, saved, session.recorder.take())
+            if on_progress is not None:
+                on_progress(done, len(latest))
+    return session.finish(latest, len({t for t, _ in everything}))
+
+
+async def ascan(
+    graph: Any,
+    saver: Any = None,
+    *,
+    migrations: Sequence[Migration] = (),
+    lock: GraphShape | None = None,
+    thread_ids: Iterable[str] | None = None,
+    thread_prefix: str | None = None,
+    where: dict[str, Any] | None = None,
+    sample: int | None = None,
+    seed: int = 0,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> ScanReport:
+    """`scan` for async checkpointers (AsyncPostgresSaver, AsyncSqliteSaver)."""
+    saver = _prepare(graph, saver)
+    filt = ThreadFilter(tuple(thread_ids) if thread_ids is not None else None, thread_prefix, where)
+    with _Session(graph, saver, migrations, lock) as session:
+        everything = await _alatest_checkpoints(saver, filt)
+        latest = _sampled(everything, sample, seed)
+        for done, ((thread_id, ns), config) in enumerate(sorted(latest.items()), start=1):
+            session.recorder.take()
+            saved = await saver.aget_tuple(config)
+            session.add(thread_id, ns, saved, session.recorder.take())
+            if on_progress is not None:
+                on_progress(done, len(latest))
+    return session.finish(latest, len({t for t, _ in everything}))
 
 
 @dataclasses.dataclass

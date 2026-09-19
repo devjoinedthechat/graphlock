@@ -17,7 +17,7 @@
   <a href="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
-  <img src="https://img.shields.io/badge/tests-181-brightgreen" alt="181 tests">
+  <img src="https://img.shields.io/badge/tests-308-brightgreen" alt="308 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
@@ -29,6 +29,7 @@
   <a href="#rules">Rules</a> ·
   <a href="#migrations">Migrations</a> ·
   <a href="#evidence">Evidence</a> ·
+  <a href="#scale">Scale</a> ·
   <a href="#what-it-does-not-do">Limits</a> ·
   <a href="#development">Development</a>
 </p>
@@ -118,6 +119,8 @@ LangGraph 1.2.11, `SqliteSaver`:
 | Rename a node that pending Send()s are addressed to | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
 | Rename a node that finished in parallel with one now waiting in interrupt() | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
 | Rename a subgraph node while a thread is paused inside it | **wrong result, no error** | GL101 | GL101 | — |
+| Rename the node a thread is waiting in, inside a subgraph | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
+| Swap two interrupt() calls inside a subgraph while a thread sits between them | **wrong result, no error** | GL401 | GL401 | — |
 | Turn on defer= for a node a thread is paused before ([langgraph#8629](https://github.com/langchain-ai/langgraph/issues/8629)) | crashes on resume | GL102 | GL102 | `defer_changed` ✓ |
 | Turn off defer= for a node a thread is paused before | resumes correctly | (GL102) | — | — |
 | Turn on defer= for a fan-in node while its barrier is half full ([langgraph#8618](https://github.com/langchain-ai/langgraph/issues/8618)) | crashes on resume | GL102 | GL102 | `defer_changed` ✓ |
@@ -136,7 +139,7 @@ LangGraph 1.2.11, `SqliteSaver`:
 | Remove a state field while a thread waits in interrupt() before a breakpoint | **wrong result, no error** | GL203 | GL203 | `drop_field` ✓ |
 | Add a reducer to a state field | resumes correctly | (GL204) | — | — |
 
-Sixteen of the twenty-three changes break a paused thread, and **eleven of those raise no error**:
+Eighteen of the twenty-five changes break a paused thread, and **thirteen of those raise no error**:
 the thread finishes early, waits forever, or carries on with wrong data. A rule in parentheses is
 reported but doesn't fail the check. LangGraph 1.0.0 and 1.1.0 behave the same on every row.
 
@@ -195,6 +198,7 @@ nothing:
 
 ```sh
 graphlock scan --postgres "$CHECKPOINT_DB"     # or --sqlite FILE, or --checkpointer app.db:saver
+graphlock scan --postgres "$CHECKPOINT_DB" --where graph=refunds --progress
 ```
 
 **5. Repair what the deploy would break**, and run the graph with the migrations:
@@ -255,6 +259,13 @@ ready in `get_state()` and still not move.
 Problems on a paused thread are breaking. On a finished thread they are warnings, because they
 only matter if the thread is continued.
 
+A store often holds several graphs' threads. With the lockfile, `scan` skips a thread that mentions
+none of the graph's nodes, old or new, as another graph's, and says how many it skipped. To be
+explicit, use `--where KEY=VALUE`, which matches checkpoint metadata including your run config's
+`metadata`, or `--thread-prefix`. Both can be set per graph in `[tool.graphlock.scan.<graph>]`.
+For very large stores, `--sample N` scans a reproducible random sample. `scan` is also available
+as `graphlock.scan()` and, for async checkpointers, `await graphlock.ascan()`.
+
 ## Rules
 
 `graphlock rules` prints each rule with what LangGraph does and how to fix it.
@@ -304,7 +315,12 @@ rewritten in place:
   writes for that thread.
 - **Repairs are written through.** Checkpointers that store each channel separately (in-memory,
   Postgres) persist only what a step wrote. Without write-through, a repaired value the step didn't
-  touch would be lost the next time the thread paused.
+  touch would be lost the next time the thread paused. [tests/test_saver.py](tests/test_saver.py)
+  shows that loss on both.
+- **Postgres keeps the first value it stored at a version.** A repair that renames or adds a channel
+  reaches storage. A repair made in place (a revived object, a converted value, a reshaped trigger)
+  is applied again on each read, until the thread next writes that field. `scan` counts those threads
+  as still needing the migration.
 - **Memory is bounded.** The wrapper remembers a thread's repairs from its read until its next
   write, for at most `max_tracked` threads (10,000 by default). LangGraph reads a thread right before
   writing it, so a resumed thread is always tracked. A dashboard polling `get_state()` on every
@@ -342,9 +358,9 @@ To make a rename safe to roll back, expand before you contract:
 
 graphlock rests on claims about what LangGraph does, so those claims are tests.
 
-[tests/corpus.py](tests/corpus.py) holds the 23 redeploy scenarios in the table above. Each pauses
+[tests/corpus.py](tests/corpus.py) holds the 25 redeploy scenarios in the table above. Each pauses
 a thread under one graph, deploys another and resumes. [tests/test_corpus.py](tests/test_corpus.py)
-checks four things for every scenario, against both `InMemorySaver` and `SqliteSaver`:
+checks four things for every scenario, against `InMemorySaver`, `SqliteSaver` and `PostgresSaver`:
 
 | Test | Asserts |
 |---|---|
@@ -353,14 +369,23 @@ checks four things for every scenario, against both `InMemorySaver` and `SqliteS
 | `test_scan_reports_the_paused_thread` | `scan` reports the right rule for that thread, and for no other |
 | `test_migration_repairs_the_thread` | With the migration, the thread resumes correctly and `check` and `scan` mark the rule repaired. Once the thread moves on, nothing needs the migration any more |
 
-[tests/test_langgraph_contract.py](tests/test_langgraph_contract.py) checks the task ids,
-interrupt ids and channel names that migrations recompute against the ones LangGraph produces.
+Around the corpus:
+
+| Test file | Holds graphlock to |
+|---|---|
+| [test_langgraph_contract.py](tests/test_langgraph_contract.py) | The task ids, interrupt ids and channel names that migrations recompute, against LangGraph's own |
+| [test_saver.py](tests/test_saver.py) | Write-through: without it, in-memory and Postgres stores lose a repair; with it, they keep it. Memory stays bounded |
+| [test_async.py](tests/test_async.py) | `ainvoke` through `with_migrations`, and `ascan`, on async SQLite and Postgres |
+| [test_security.py](tests/test_security.py) | `scan` imports nothing a checkpoint names, and nothing a strict serializer blocks |
+| [test_stores.py](tests/test_stores.py) | The one-query path to each thread's latest checkpoint agrees with the checkpointer's own `list()` |
+| [test_filters.py](tests/test_filters.py) | In a store shared by several graphs, only the graph's own threads are counted |
+| [test_cli.py](tests/test_cli.py) | The whole flow on [examples/refunds](examples/refunds), including rollback checks |
 
 The suite passes on LangGraph 1.0.0, 1.1.0 and 1.2.11, and on Python 3.10 to 3.14. The CI workflow
 runs it against LangGraph 1.0.0 and the latest release, and writes the evidence table to the job
 summary.
 
-Building the corpus corrected graphlock four times:
+Building the corpus corrected graphlock five times:
 - **`get_state()` was the wrong oracle.** After `rename_node`, `get_state()` reported the thread as
   ready to run, but `invoke` did nothing. The run loop plans from the checkpoint's
   `updated_channels`, which still named the old channel. Migrations now rename it, and `scan`
@@ -374,6 +399,29 @@ Building the corpus corrected graphlock four times:
 - **A rule was too broad.** GL203 first flagged `interrupt_after` breakpoints too. Testing it showed
   they are unaffected, so the rule now blocks only on `interrupt_before`, and a scenario for each
   pins the difference.
+- **Postgres doesn't overwrite.** Running the corpus on Postgres showed that a repair made in place is
+  never persisted, because Postgres keeps the first value stored at a version. The docs now say so,
+  and the tests assert what each checkpointer does.
+
+## Scale
+
+`scan` finds each thread's latest checkpoint with one query on SQLite and Postgres. With other
+checkpointers it uses their own `list()`, which loads every checkpoint of every thread. It then
+loads one checkpoint per thread and analyses it in memory.
+
+[`scripts/bench_scan.py`](scripts/bench_scan.py) builds a store in which every thread has 13
+checkpoints and is paused at a breakpoint that the deploy renames, so every thread is reported. On
+an Apple M4 Pro, with Postgres 16 in Docker on the same machine:
+
+| Store | Threads | One query | Checkpointer's `list()` | `--sample 1000` | Peak memory |
+|---|---|---|---|---|---|
+| SQLite | 10,000 | 0.52s | 2.28s | 0.08s | 92 MB |
+| SQLite | 100,000 (5 GB) | 10.95s | — | 0.26s | 199 MB |
+| Postgres | 10,000 | 5.46s | 12.65s | 0.62s | 1.7 GB with `list()` |
+| Postgres | 100,000 | 72.25s | — | 1.65s | 223 MB |
+
+On Postgres most of the time is one round trip per thread. Memory stays flat with the one-query
+path; `list()` fetches every checkpoint first.
 
 ## What it does not do
 
@@ -383,16 +431,16 @@ Building the corpus corrected graphlock four times:
   functions the node can see, whether module globals or closure variables, two levels deep. Calls
   through attributes (`self.ask()`, `approvals.ask()`) are not followed. Nodes whose source can't be
   read, such as a lambda in the middle of a multi-line call, are skipped rather than guessed at.
-- **Renamed subgraph nodes.** A subgraph's checkpoints are stored under a namespace that contains
-  the node name and a task id, so `rename_node` can't carry a thread paused inside one. `check` and
-  `scan` report it; drain those threads before deploying.
+- **Renaming a subgraph node itself.** A subgraph's checkpoints are stored under a namespace that
+  contains the node's name and a task id, so `rename_node` can't carry a thread paused inside one.
+  `check` and `scan` report it; drain those threads before deploying. Changes *inside* a subgraph
+  are repaired like any others, with `graph="research"`.
 - **Breakpoints passed at call time.** `invoke(..., interrupt_before=[...])` isn't part of the
   graph, so `check` can't see it. `scan` reads stored checkpoints and is unaffected.
 - **Checkpointers you can't wrap.** `with_migrations` runs in your process. A platform that owns
   the checkpointer can still be locked, checked and scanned, but not migrated this way.
-- **Very large stores.** `scan` reads the latest checkpoint of every thread through the
-  checkpointer's own API. That is fine for thousands of threads; for millions, sample with
-  `--thread`.
+- **Fast lookups for every store.** Checkpointers other than SQLite and Postgres are scanned
+  through their own `list()`, which reads all history. Use `--sample` on large ones.
 - **Stable LangGraph APIs.** Channel names, task ids and checkpoint layout are not public API.
   graphlock imports all of them in one module, [`src/graphlock/_lg.py`](src/graphlock/_lg.py), and
   the corpus pins the behaviour each one is used for. A LangGraph release that changes one fails
@@ -402,9 +450,10 @@ Building the corpus corrected graphlock four times:
 
 ```sh
 uv sync
-uv run pytest                            # 181 tests, a few seconds
+uv run pytest                            # 308 tests, about ten seconds with Postgres
 uv run ruff check . && uv run mypy src   # strict
 uv run python scripts/evidence.py        # the table above, against the installed LangGraph
+uv run python scripts/bench_scan.py      # the Scale table (add --postgres URL for Postgres)
 ```
 
 The layout:

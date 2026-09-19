@@ -6,7 +6,7 @@ import argparse
 import contextlib
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from graphlock import lockfile, report
@@ -64,6 +64,17 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--sqlite", metavar="PATH", help="a SqliteSaver database file")
     p.add_argument("--postgres", metavar="URL", help="a PostgresSaver connection string")
     p.add_argument("--thread", action="append", default=None, metavar="ID", help="only these thread ids")
+    p.add_argument("--thread-prefix", metavar="PREFIX", help="only threads whose id starts with PREFIX")
+    p.add_argument("--sample", type=int, metavar="N", help="scan N threads chosen at random (reproducibly)")
+    p.add_argument("--seed", type=int, default=0, help="the seed for --sample (default 0)")
+    p.add_argument("--progress", action="store_true", help="report progress on stderr")
+    p.add_argument(
+        "--where",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="only threads whose checkpoint metadata has KEY=VALUE (repeatable)",
+    )
     p.add_argument(
         "--no-lock", action="store_true", help="don't read the lockfile (skips interrupt-order checks)"
     )
@@ -97,6 +108,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"graphlock: {exc}\n")
         return EXIT_ERROR
     return EXIT_ERROR  # pragma: no cover - argparse requires a command
+
+
+def _progress(name: str) -> Callable[[int, int], None]:
+    def report(done: int, total: int) -> None:
+        if done == total or done % 500 == 0:
+            sys.stderr.write(f"\r{name}: read {done:,} of {total:,} checkpoints")
+            if done == total:
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    return report
 
 
 def _migrations_path(args: argparse.Namespace, configured: str | None) -> str | None:
@@ -175,8 +197,24 @@ def _scan(args: argparse.Namespace) -> int:
         for name, path in config.graphs.items():
             graph = load_graph(path, config.root)
             migrations = load_migrations(_migrations_path(args, config.migrations), name, config.root)
+            configured = config.scan.get(name, {})
+            where = dict(configured.get("where", {}))
+            for pair in args.where:
+                key, sep, value = pair.partition("=")
+                if not sep:
+                    raise ConfigError(f"--where takes KEY=VALUE, got {pair!r}")
+                where[key] = value
             results[name] = scan(
-                graph, saver, migrations=migrations, lock=locked.get(name), thread_ids=args.thread
+                graph,
+                saver,
+                migrations=migrations,
+                lock=locked.get(name),
+                thread_ids=args.thread,
+                thread_prefix=args.thread_prefix or configured.get("thread_prefix"),
+                where=where or None,
+                sample=args.sample,
+                seed=args.seed,
+                on_progress=_progress(name) if args.progress else None,
             )
     if args.format == "json":
         sys.stdout.write(report.scan_json(results))

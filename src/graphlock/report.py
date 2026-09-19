@@ -98,10 +98,29 @@ def check_github(results: dict[str, list[Finding]], lockfile: str) -> str:
 
 
 def scan_text(name: str, report: ScanReport) -> str:
+    sampled = (
+        f" (a sample of {report.stored_threads:,})"
+        if report.stored_threads > report.threads + report.foreign
+        else ""
+    )
     out = [
-        f"{name}: {report.threads} thread{'s' if report.threads != 1 else ''}, "
-        f"{report.paused} paused mid-run",
+        f"{name}: {report.threads:,} thread{'s' if report.threads != 1 else ''}{sampled}, "
+        f"{report.paused:,} paused mid-run",
     ]
+    if report.foreign:
+        out.append(
+            f"  skipped {report.foreign} thread{'s' if report.foreign != 1 else ''} of other graphs: "
+            "none of their nodes are in this graph or its lockfile"
+        )
+    if report.unrelated:
+        out.append(
+            _wrap(
+                f"note: {report.unrelated} thread{'s' if report.unrelated != 1 else ''} mention none of this "
+                "graph's nodes. If the store holds other graphs' threads, narrow the scan with --where or "
+                "--thread-prefix, or keep graphlock.json next to the code so scan can tell them apart.",
+                "  ",
+            )
+        )
     if not report.issues:
         out.append("  every stored thread resumes correctly under this graph")
     for (code, subject, level), issues in group_issues(report.issues).items():

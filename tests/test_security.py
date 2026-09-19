@@ -8,6 +8,7 @@ imports of its own: scanning a store can be no more dangerous than resuming its 
 from __future__ import annotations
 
 import importlib
+import inspect
 import operator
 import sqlite3
 import sys
@@ -64,6 +65,10 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     return db, marker
 
 
+@pytest.mark.skipif(
+    "allowed_msgpack_modules" not in inspect.signature(JsonPlusSerializer).parameters,
+    reason="this LangGraph's serializer has no allowlist",
+)
 def test_scan_imports_nothing_the_serializer_blocks(store: tuple[Path, Path]) -> None:
     db, marker = store
     strict = JsonPlusSerializer(allowed_msgpack_modules=None)  # LANGGRAPH_STRICT_MSGPACK=true

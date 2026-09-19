@@ -13,4 +13,10 @@ First version.
 - GL401 follows `interrupt()` calls into helper functions, two levels deep.
 - `with_migrations` bounds its memory (`max_tracked`), counts repairs in `stats` and logs them.
 - `scan` never imports a module because stored data names it (tests/test_security.py).
+- Postgres and async: the corpus runs on `PostgresSaver` too; `with_migrations` works through
+  `ainvoke`; `ascan` scans async checkpointers.
+- `scan` skips other graphs' threads when it has the lockfile, and takes `--where`, `--thread-prefix`,
+  `--sample` and `--progress`. On SQLite and Postgres it finds each thread's latest checkpoint with
+  one query: 100,000 threads in 11s on SQLite and 72s on Postgres.
+- Corpus scenarios for changes inside a subgraph.
 - Tested against LangGraph 1.0.0, 1.1.0 and 1.2.11, and Python 3.10 to 3.14.

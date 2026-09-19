@@ -175,6 +175,23 @@ def with_subgraph(name: str) -> Callable[[Any], Any]:
     return build
 
 
+def subgraph_inner(inner: str, ask: Callable[[Any], Any] = inner_ask) -> Callable[[Any], Any]:
+    """A parent that runs subgraph 'research', whose node `inner` waits in interrupt()."""
+
+    def build(saver: Any) -> Any:
+        sb = StateGraph(S)
+        sb.add_node(inner, ask)
+        sb.add_edge(START, inner)
+        b = StateGraph(S)
+        b.add_node("research", sb.compile())
+        b.add_node("after", step("after"))
+        b.add_edge(START, "research")
+        b.add_edge("research", "after")
+        return b.compile(checkpointer=saver)
+
+    return build
+
+
 # ---------------------------------------------------------------- defer and fan-in
 
 
@@ -519,6 +536,31 @@ SCENARIOS: list[Scenario] = [
         today=SILENT,
         rule="GL101",
         scan="GL101",
+    ),
+    Scenario(
+        "rename-inside-subgraph",
+        "Rename the node a thread is waiting in, inside a subgraph",
+        subgraph_inner("inner"),
+        subgraph_inner("inner_review"),
+        start_plain,
+        resume_yes,
+        lambda r: log_of(r) == ["inner:yes", "after"],
+        today=SILENT,
+        rule="GL101",
+        scan="GL101",
+        migrations=[gl.rename_node("inner", "inner_review", graph="research")],
+    ),
+    Scenario(
+        "interrupts-reordered-inside-subgraph",
+        "Swap two interrupt() calls inside a subgraph while a thread sits between them",
+        subgraph_inner("ask", ask_amount_then_approver),
+        subgraph_inner("ask", ask_approver_then_amount),
+        start_answer_amount,
+        resume_alice,
+        lambda r: sorted(log_of(r)) == ["after", "amount=500", "approver=alice"],
+        today=SILENT,
+        rule="GL401",
+        scan="GL401",
     ),
     Scenario(
         "defer-on",

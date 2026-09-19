@@ -47,14 +47,14 @@ def test_a_repair_survives_the_thread_pausing_again(make_saver: Callable[[], Any
 def test_without_write_through_the_repair_is_lost(
     monkeypatch: pytest.MonkeyPatch, make_saver: Callable[[], Any]
 ) -> None:
-    """Why write-through exists. SQLite stores whole checkpoints, so only per-channel savers lose it."""
+    """Why write-through exists. SQLite stores whole checkpoints; per-channel savers lose the repair."""
     monkeypatch.setattr(MigratingSaver, "_write_through", lambda self, config, checkpoint, versions: versions)
     saver = make_saver()
     two_breakpoints(("x", "y3"))(saver).invoke({"log": []}, CFG)
     graph = gl.with_migrations(two_breakpoints(("y3", "x"))(saver), MIGRATIONS)
     graph.invoke(None, CFG)
     result = graph.invoke(None, CFG)
-    per_channel_storage = type(saver).__name__ == "InMemorySaver"
+    per_channel_storage = type(saver).__name__ in {"InMemorySaver", "PostgresSaver"}
     assert ("join" in log_of(result)) is not per_channel_storage
 
 

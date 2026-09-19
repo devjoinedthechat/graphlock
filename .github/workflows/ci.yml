@@ -18,6 +18,16 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: graphlock
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      GRAPHLOCK_TEST_POSTGRES: postgresql://postgres:graphlock@localhost:5432/postgres
     strategy:
       fail-fast: false
       matrix:
@@ -28,8 +38,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Test against LangGraph ${{ matrix.langgraph }}
         run: |
-          if [ "${{ matrix.langgraph }}" = "latest" ]; then pin="langgraph"; else pin="langgraph==${{ matrix.langgraph }}"; fi
-          uv run --isolated -p ${{ matrix.python }} --with "$pin" --with langgraph-checkpoint-sqlite --with pytest --with-editable . pytest -q
+          if [ "${{ matrix.langgraph }}" = "latest" ]; then pin="langgraph"; aio="aiosqlite"; else pin="langgraph==${{ matrix.langgraph }}"; aio="aiosqlite<0.22"; fi
+          uv run --isolated -p ${{ matrix.python }} --with "$pin" --with langgraph-checkpoint-sqlite --with langgraph-checkpoint-postgres --with "psycopg[binary]" --with "$aio" --with pytest --with-editable . pytest -q
       - name: Evidence table (what LangGraph does today)
         if: matrix.langgraph == 'latest' && matrix.python == '3.12'
         run: uv run --isolated -p 3.12 --with langgraph --with langgraph-checkpoint-sqlite --with-editable . python scripts/evidence.py >> "$GITHUB_STEP_SUMMARY"

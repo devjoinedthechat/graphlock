@@ -29,6 +29,7 @@ class Config:
     lockfile: Path
     migrations: str | None  # "module:attr" of a list of migrations, or of a dict name -> list
     root: Path
+    scan: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)  # graph -> thread filter
 
 
 def load_config(root: Path | None = None, graphs: Sequence[str] = ()) -> Config:
@@ -55,6 +56,7 @@ def load_config(root: Path | None = None, graphs: Sequence[str] = ()) -> Config:
         lockfile=root / table.get("lockfile", DEFAULT_LOCKFILE),
         migrations=table.get("migrations"),
         root=root,
+        scan=dict(table.get("scan", {})),
     )
 
 

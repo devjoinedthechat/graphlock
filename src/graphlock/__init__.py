@@ -14,7 +14,7 @@ from graphlock.migrations import (
     set_default,
 )
 from graphlock.saver import MigratingSaver, with_migrations
-from graphlock.scan import ScanReport, ThreadIssue, scan
+from graphlock.scan import ScanReport, ThreadFilter, ThreadIssue, ascan, scan
 from graphlock.shape import GraphShape, extract_shape
 
 __all__ = [
@@ -26,7 +26,9 @@ __all__ = [
     "Rule",
     "ScanReport",
     "Severity",
+    "ThreadFilter",
     "ThreadIssue",
+    "ascan",
     "check",
     "check_rollback",
     "convert_field",
