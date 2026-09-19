@@ -1,31 +1,57 @@
 # Changelog
 
-## Unreleased
+All notable changes to graphlock are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/).
 
-First version.
+## [0.1.0] - Unreleased
 
-- `graphlock lock`, `check`, `scan`, `rules` and `show`, with text, JSON and GitHub
-  Actions output.
-- Twelve rules, GL101 to GL402, each backed by a redeploy scenario in `tests/corpus.py`.
-- Eight migrations and `with_migrations()`: repairs are applied on read and written through with
-  the thread's next checkpoint.
-- `graphlock check --reverse`: what a rollback would break for threads that ran on the new code.
-- GL401 follows `interrupt()` calls into helper functions, two levels deep.
-- `with_migrations` bounds its memory (`max_tracked`), counts repairs in `stats` and logs them.
-- `scan` never imports a module because stored data names it (tests/test_security.py).
-- Postgres and async: the corpus runs on `PostgresSaver` too; `with_migrations` works through
-  `ainvoke`; `ascan` scans async checkpointers.
-- `scan` skips other graphs' threads when it has the lockfile, and takes `--where`, `--thread-prefix`,
-  `--sample` and `--progress`. On SQLite and Postgres it finds each thread's latest checkpoint with
-  one query: 100,000 threads in 11s on SQLite and 72s on Postgres.
-- Corpus scenarios for changes inside a subgraph.
-- Property tests (Hypothesis): random graphs, refactors and pause points, checked against what
-  LangGraph does. They found four silent failure classes and three kinds of false alarm, all now
-  fixed and pinned in the corpus. Turning `defer` off is now breaking (GL102).
-- `redirect_node` and `drop_node` migrations for removed nodes.
-- Validated against the history of seven public LangGraph apps (`scripts/history.py`). That review
-  refined three rules: GL401 now tells a moved `interrupt()` call (breaking) from reworded prompts
-  (info) and calls removed from the end (warning); a type change together with a reducer change is
-  breaking (GL204), and `scan` tries the new reducer on each stored value; a type that only widens is
-  informational (GL202).
-- Tested against LangGraph 1.0.0, 1.1.0 and 1.2.11, and Python 3.10 to 3.14.
+The first release.
+
+### Commands
+
+- `graphlock lock` records the shape of each deployed graph in `graphlock.json`.
+- `graphlock check` compares a pull request's graphs with the lockfile, and exits 1 on changes that
+  would break stored threads.
+- `graphlock check --reverse` reports what rolling back would break for threads that ran on the new
+  code.
+- `graphlock scan` reports which stored threads a deploy would break, on SQLite, Postgres or any
+  checkpointer.
+- `graphlock rules` lists the rules, and `graphlock show` prints a graph's shape.
+- Text, JSON and GitHub Actions output. `--lockfile` selects a per-environment lockfile.
+
+### Rules
+
+- Twelve rules, GL101 to GL402, covering removed or renamed nodes, `defer` changes, fan-ins, state
+  fields, reducers, stored classes and `interrupt()` calls. Each one is backed by redeploy scenarios
+  in `tests/corpus.py`.
+
+### Migrations
+
+- `rename_node`, `redirect_node`, `drop_node`, `rename_channel`, `rename_field`, `drop_field`,
+  `set_default`, `convert_field`, `revive` and `defer_changed`.
+- `with_migrations()` repairs threads as LangGraph reads them and writes repairs through with the
+  next checkpoint. It bounds its memory, counts repairs in `stats`, and logs them at DEBUG.
+
+### Scanning
+
+- `scan` and `ascan` for sync and async checkpointers.
+- It skips other graphs' threads when it has the lockfile, and takes `--where`, `--thread-prefix`,
+  `--sample` and `--progress`.
+- On SQLite and Postgres it finds each thread's latest checkpoint with one query. 100,000 threads
+  scan in 11s on SQLite and 72s on Postgres.
+- It never imports a module because stored data names it.
+
+### Integrations
+
+- A GitHub Action, a pre-commit hook, and a release workflow that publishes through PyPI trusted
+  publishing.
+
+### Verification
+
+- 30 redeploy scenarios, checked against `InMemorySaver`, `SqliteSaver` and `PostgresSaver`.
+- Property tests over random graphs, refactors and pause points.
+- A replay of seven public LangGraph apps' histories.
+- Tested on LangGraph 1.0.0, 1.1.0 and 1.2.11, and Python 3.10 to 3.14.
+
+[0.1.0]: https://github.com/devjoinedthechat/graphlock/releases/tag/v0.1.0

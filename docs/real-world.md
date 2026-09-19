@@ -82,21 +82,17 @@ Each was categorised from its structural diff:
 
 None is a kind of change the corpus shows breaking a paused thread.
 
-## What the review changed in graphlock
+## Calibration
 
-- **Four false positives, now fixed.** The first run blocked four changes as GL401 where only the
-  wording of an `interrupt()` prompt had changed. Answers are passed by position, so rewording
-  misroutes nothing. GL401 now tells a *moved* call (breaking) from *reworded* prompts (GL402,
-  information) and calls *removed* from the end (a warning). One of the four only existed because
-  the first version of the replay compared commits across merged branches; it now follows the
-  mainline. A fifth GL401, where the `interrupt()` moved out of the node into a new
-  `human_feedback` node, is now a warning: a thread paused there runs the node again without asking,
-  and is asked again in `human_feedback`.
-- **One miss, now fixed.** The `feedback_on_report_plan` change was only a warning, although it
-  crashes. A type change together with a new reducer is now breaking, `scan` tries each stored value
-  against the new reducer, and the corpus pins it.
-- **Noise, now fixed.** A LangChain tool used as a type annotation was printed through its `repr`.
-  It is now named by its class and tool name.
+These results are not an independent measure of precision: some rules were refined on this data.
+- **GL401** tells a *moved* `interrupt()` call (breaking) apart from *reworded* prompts (GL402,
+  information) and calls *removed* from the end (a warning). Without that distinction, four
+  prompt rewordings in open_deep_research would have been blocked.
+- **GL204** is breaking when a field's type and reducer change together. The
+  `feedback_on_report_plan` change is the case it was made for.
+
+The replay follows the mainline. Comparing commits across merged branches produces differences that
+no deploy ever made.
 
 ## Limits
 
