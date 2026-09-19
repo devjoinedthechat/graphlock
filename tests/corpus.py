@@ -192,6 +192,64 @@ def subgraph_inner(inner: str, ask: Callable[[Any], Any] = inner_ask) -> Callabl
     return build
 
 
+def passed_then_breakpoint(first: str) -> Callable[[Any], Any]:
+    """`first` runs, then b waits in interrupt(), then c has an interrupt_before breakpoint."""
+
+    def build(saver: Any) -> Any:
+        b = StateGraph(S)
+        b.add_node(first, step("a"))
+        b.add_node("b", ask_b)
+        b.add_node("c", step("c"))
+        b.add_edge(START, first)
+        b.add_edge(first, "b")
+        b.add_edge("b", "c")
+        return b.compile(checkpointer=saver, interrupt_before=["c"])
+
+    return build
+
+
+def ask_n2(state: Any) -> dict[str, Any]:
+    return {"log": [f"n2:{interrupt('n2?')}"]}
+
+
+def deferred_sibling(defer: bool) -> Callable[[Any], Any]:
+    """n0 fans out to n1 (deferred in v1) and n2, which waits in interrupt()."""
+
+    def build(saver: Any) -> Any:
+        b = StateGraph(S)
+        b.add_node("n0", step("n0"))
+        b.add_node("n1", step("n1"), defer=defer)
+        b.add_node("n2", ask_n2)
+        b.add_edge(START, "n0")
+        b.add_edge("n0", "n1")
+        b.add_edge("n0", "n2")
+        return b.compile(checkpointer=saver)
+
+    return build
+
+
+def ask_n1(state: Any) -> dict[str, Any]:
+    return {"log": [f"n1:{interrupt('n1?')}"]}
+
+
+def pending_fan_in(sources: Sequence[str]) -> Callable[[Any], Any]:
+    """n1 (waiting in interrupt()) and n3 run in parallel; n3's write to the fan-in is still pending."""
+
+    def build(saver: Any) -> Any:
+        b = StateGraph(S)
+        b.add_node("n0", step("n0"))
+        b.add_node("n1", ask_n1)
+        b.add_node("n3", step("n3"))
+        b.add_node("n4", step("n4"))
+        b.add_edge(START, "n0")
+        b.add_edge("n0", "n1")
+        b.add_edge("n0", "n3")
+        b.add_edge(list(sources), "n4")
+        return b.compile(checkpointer=saver)
+
+    return build
+
+
 # ---------------------------------------------------------------- defer and fan-in
 
 
@@ -498,6 +556,20 @@ SCENARIOS: list[Scenario] = [
         today=SILENT,
         rule="GL101",
         scan="GL101",
+        migrations=[gl.redirect_node("review", to="issue")],
+    ),
+    Scenario(
+        "rename-passed-node",
+        "Rename a node the thread already passed, in a graph with a later breakpoint",
+        passed_then_breakpoint("a"),
+        passed_then_breakpoint("a_v2"),
+        start_plain,
+        resume_yes_then_continue,
+        lambda r: log_of(r) == ["a", "b:yes", "c"],
+        today=SILENT,
+        rule="GL101",
+        scan="GL101",
+        migrations=[gl.rename_node("a", "a_v2")],
     ),
     Scenario(
         "rename-send-target",
@@ -585,9 +657,21 @@ SCENARIOS: list[Scenario] = [
         resume_none,
         lambda r: log_of(r) == ["a", "b"],
         today=OK,
-        rule=None,
+        rule="GL102",  # this thread is fine; one waiting for its run to finish loses the node
         scan=None,
-        info="GL102",
+    ),
+    Scenario(
+        "defer-off-waiting",
+        "Turn off defer= for a node that is waiting for its run to finish",
+        deferred_sibling(True),
+        deferred_sibling(False),
+        start_plain,
+        resume_yes,
+        lambda r: sorted(log_of(r)) == ["n0", "n1", "n2:yes"],
+        today=SILENT,
+        rule="GL102",
+        scan="GL102",
+        migrations=[gl.defer_changed("n1")],
     ),
     Scenario(
         "fan-in-defer-on",
@@ -629,6 +713,19 @@ SCENARIOS: list[Scenario] = [
         rule="GL103",
         scan="GL103",
         migrations=[gl.rename_channel("join:x+y2:join", "join:y2+x:join")],
+    ),
+    Scenario(
+        "fan-in-reordered-pending",
+        "List a fan-in's sources in another order while a finished source's write is still pending",
+        pending_fan_in(("n1", "n3")),
+        pending_fan_in(("n3", "n1")),
+        start_plain,
+        resume_yes,
+        lambda r: sorted(log_of(r)) == ["n0", "n1:yes", "n3", "n4"],
+        today=SILENT,
+        rule="GL103",
+        scan="GL103",
+        migrations=[gl.rename_channel("join:n1+n3:n4", "join:n3+n1:n4")],
     ),
     Scenario(
         "required-field-added",

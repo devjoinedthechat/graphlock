@@ -12,10 +12,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import settings
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# tests/test_properties.py: a hundred examples per property by default; `deep` for a long search,
+# `ci` for runs that must be reproducible.
+settings.register_profile("default", max_examples=100)
+settings.register_profile("deep", max_examples=3000)
+settings.register_profile("ci", max_examples=200, derandomize=True)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 POSTGRES_ENV = "GRAPHLOCK_TEST_POSTGRES"
 POSTGRES_TABLES = "checkpoints, checkpoint_blobs, checkpoint_writes"

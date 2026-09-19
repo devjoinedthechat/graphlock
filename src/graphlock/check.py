@@ -143,10 +143,11 @@ def _defer_finding(name: str, new_node: NodeShape, old: GraphShape, path: str) -
         )
         return Finding("GL102", name, message, graph=path)
     message = (
-        f"defer was turned off for '{name}'. Pending triggers restore fine; a thread waiting for the "
-        "end of its run to start it will start it at the next step instead."
+        f"defer was turned off for '{name}'. A thread where '{name}' is waiting for its run to finish "
+        "never runs it: the run loop no longer schedules it at the end, and nothing else does. No "
+        "error is raised."
     )
-    return Finding("GL102", name, message, graph=path, severity=Severity.INFO)
+    return Finding("GL102", name, message, graph=path)
 
 
 def _interrupts(name: str, node: NodeShape, new_node: NodeShape, path: str) -> list[Finding]:

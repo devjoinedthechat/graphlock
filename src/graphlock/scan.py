@@ -388,6 +388,7 @@ class _Analysis:
     locked: GraphShape | None
     saver: Any
     pending: bool = False
+    _pending_nodes: set[str] = dataclasses.field(default_factory=set)
     issues: list[ThreadIssue] = dataclasses.field(default_factory=list)
 
     def issue(self, code: str, subject: str, message: str, severity: Severity | None = None) -> None:
@@ -437,6 +438,7 @@ class _Analysis:
                     "serializer's allowlist; it restores as a plain dict or None.",
                 )
 
+        self._pending_nodes = expected | {j[1] for j, _ in barriers.values()}
         channels = self._restore(ckpt, saved.config)
         next_nodes: set[str] | None = None
         if channels is not None:
@@ -448,6 +450,26 @@ class _Analysis:
                 )
             except Exception as exc:
                 self.issue("GL205", "restore", f"Planning the next step fails: {_short(exc)}")
+
+        # The run loop plans the first step from `updated_channels` only. A deferred trigger listed
+        # there is planned like any other once `defer` is off; one that isn't is never planned.
+        updated = ckpt.get("updated_channels")
+        for node in sorted(expected_later & set(self.graph.nodes)):
+            channel = _lg.branch_channel(node)
+            stored = ckpt["channel_values"].get(channel)
+            if updated is None or channel in updated:
+                continue
+            if (
+                _is_after_finish(stored)
+                and not stored[1]
+                and not _after_finish(self.graph.channels.get(channel))
+            ):
+                self.issue(
+                    "GL102",
+                    node,
+                    f"'{node}' is deferred and waiting for the run to finish, but it is no longer deferred. "
+                    "Nothing will schedule it: it never runs, and no error is raised.",
+                )
 
         for node in sorted(expected):
             if node not in self.graph.nodes:
@@ -466,7 +488,15 @@ class _Analysis:
                 )
 
         for channel, ((sources, target), seen) in sorted(barriers.items()):
-            if channel in self.graph.channels or target not in self.graph.nodes:
+            if channel in self.graph.channels:
+                continue
+            if target not in self.graph.nodes:
+                self.issue(
+                    "GL101",
+                    target,
+                    f"Waiting on a fan-in into '{target}' after {sorted(seen)} finished, but '{target}' no "
+                    "longer exists. It will never run.",
+                )
                 continue
             self.issue(
                 "GL103",
@@ -475,27 +505,88 @@ class _Analysis:
                 "its fan-in channel was renamed. It will never run.",
             )
 
-        self._check_stale_fields(ckpt)
+        self._check_orphaned_writes(writes)
+        self._check_stale_channels(ckpt, expected | {j[1] for j, _ in barriers.values()})
         self._check_values(values)
         self._check_interrupt_order(ckpt, writes, step)
         return self.issues
 
-    def _check_stale_fields(self, ckpt: Any) -> None:
-        """Versions of state channels the new graph doesn't have break interrupt_before breakpoints."""
+    def _check_orphaned_writes(self, writes: Sequence[tuple[str, str, Any]]) -> None:
+        """Writes of tasks that finished before the pause, to channels the new graph doesn't have.
+
+        LangGraph applies them when the step completes, and drops any to an unknown channel with only
+        a log line: "wrote to unknown channel, ignoring it".
+        """
+        reported = {(i.code, i.subject) for i in self.issues}
+        for _, channel, value in writes:
+            if channel.startswith("__") or channel in self.graph.channels:
+                continue
+            join = _lg.parse_join(channel)
+            if join is not None:
+                target = join[1]
+                if target not in self.graph.nodes:
+                    key = ("GL101", target)
+                    message = (
+                        f"A finished '{value}' wrote to the fan-in into '{target}', which no longer exists. "
+                        "LangGraph drops the write."
+                    )
+                else:
+                    key = ("GL103", channel)
+                    message = (
+                        f"A finished '{value}' wrote to fan-in channel '{channel}', which the new graph "
+                        f"names differently. LangGraph drops the write, so '{target}' never runs."
+                    )
+                if key not in reported:
+                    reported.add(key)
+                    self.issue(key[0], key[1], message)
+            elif not channel.startswith(_lg.BRANCH_PREFIX) and ("GL203", channel) not in reported:
+                reported.add(("GL203", channel))
+                self.issue(
+                    "GL203",
+                    channel,
+                    f"A finished task wrote to removed field '{channel}'. LangGraph drops the write.",
+                    severity=Severity.INFO,
+                )
+
+    def _check_stale_channels(self, ckpt: Any, pending: set[str]) -> None:
+        """Channels the new graph doesn't have make interrupt_before re-fire forever (see GL203).
+
+        LangGraph marks only the new graph's channels as seen on resume, but its breakpoint check
+        compares every stored version. A leftover channel of any kind does it: a removed field, the
+        trigger of a renamed node that already ran, a fan-in listed in another order. It only bites
+        when the thread reaches an interrupt_before node, so a thread past every breakpoint is fine.
+        """
         breakpoints = _breakpoints(self.graph)
-        if not breakpoints:
+        if not breakpoints or not _reaches(self.graph, pending, breakpoints, finished=not self.pending):
             return
-        for channel in sorted(ckpt["channel_versions"]):
+        reported = {(i.code, i.subject) for i in self.issues}
+        where = ", ".join(breakpoints)
+        # A channel the graph no longer has is never written again. If a resume under the old code
+        # already marked its current version as seen by the breakpoint, it can never look new.
+        seen_by_breakpoint = ckpt["versions_seen"].get(_lg.INTERRUPT, {})
+        for channel, version in sorted(ckpt["channel_versions"].items()):
             if channel in self.graph.channels or channel in (_lg.START, _lg.TASKS):
                 continue
-            if channel.startswith((_lg.BRANCH_PREFIX, _lg.JOIN_PREFIX)):
-                continue  # renamed or removed nodes and fan-ins are reported on their own
+            if channel in seen_by_breakpoint and not version > seen_by_breakpoint[channel]:
+                continue
+            join = _lg.parse_join(channel)
+            if channel.startswith(_lg.BRANCH_PREFIX):
+                code, subject = "GL101", channel[len(_lg.BRANCH_PREFIX) :]
+                what = f"a leftover trigger of removed node '{subject}'"
+            elif join is not None:
+                code, subject = "GL103", channel
+                what = f"a leftover fan-in channel '{channel}'"
+            else:
+                code, subject = "GL203", channel
+                what = f"a value for removed field '{channel}'"
+            if (code, subject) in reported:
+                continue
+            reported.add((code, subject))
             self.value_issue(
-                "GL203",
-                channel,
-                f"Holds a value for removed field '{channel}'. At an interrupt_before breakpoint "
-                f"({', '.join(breakpoints)}) this thread will pause again on every resume and never get "
-                "past it, whether it is paused there now or reaches it later.",
+                code,
+                subject,
+                f"Holds {what}. At an interrupt_before breakpoint ({where}) this thread will pause again "
+                "on every resume and never get past it, whether it is paused there now or reaches it later.",
             )
 
     def _expected_nodes(self, ckpt: Any, writes: Sequence[tuple[str, str, Any]]) -> tuple[set[str], set[str]]:
@@ -516,7 +607,9 @@ class _Analysis:
                 continue
             last_seen = seen.get(node, {}).get(channel)
             if last_seen is None or version > last_seen:
-                nodes.add(node)
+                # A deferred node's trigger is `(value, finished)`: until the run finishes, it's due later.
+                pending_finish = _is_after_finish(values[channel]) and not values[channel][1]
+                (later if pending_finish else nodes).add(node)
         for send in values.get(_lg.TASKS) or []:
             if isinstance(send, _lg.Send):
                 nodes.add(send.node)
@@ -537,6 +630,9 @@ class _Analysis:
             stored = ckpt["channel_values"].get(name, _lg.MISSING)
             try:
                 channel = spec.from_checkpoint(stored)
+                if stored is not _lg.MISSING and self._latent_barrier(name, channel, stored):
+                    restored[name] = channel
+                    continue
                 if stored is not _lg.MISSING:
                     channel.is_available()
                     _probe_shape(channel)
@@ -567,6 +663,26 @@ class _Analysis:
             )
             return None
         return dict(channels)
+
+    def _latent_barrier(self, name: str, channel: Any, stored: Any) -> bool:
+        """A fan-in barrier restored in the wrong shape that holds no sources yet.
+
+        It fires nothing and crashes nothing until one of its sources writes to it again, so it only
+        matters if the thread can still reach a source. True when handled here.
+        """
+        seen = getattr(channel, "seen", None)
+        join = _lg.parse_join(name)
+        if join is None or seen is None or isinstance(seen, (set, frozenset)) or _barrier_seen(stored):
+            return False
+        sources, target = join
+        if _reaches(self.graph, self._pending_nodes, sources, finished=not self.pending):
+            self.value_issue(
+                "GL102",
+                target,
+                f"The fan-in into '{target}' restores in the wrong shape. The next time one of {sources} "
+                "finishes, writing to it crashes.",
+            )
+        return True
 
     def _check_values(self, values: dict[str, Any]) -> None:
         schema = self.graph.builder.state_schema
@@ -637,6 +753,53 @@ class _Analysis:
                     f"Paused inside '{name}' after {answered} answered interrupt(s); its interrupt() calls "
                     "changed order, so stored answers will go to the wrong calls.",
                 )
+
+
+def _after_finish(channel: Any) -> bool:
+    return isinstance(channel, (_lg.LastValueAfterFinish, _lg.NamedBarrierValueAfterFinish))
+
+
+def _is_after_finish(value: Any) -> bool:
+    return isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[1], bool)
+
+
+def _successors(graph: Any) -> dict[str, set[str]]:
+    """Where each node can go next, from the graph's edges. A branch with unknown targets goes anywhere."""
+    builder = graph.builder
+    everywhere = set(builder.nodes)
+    succ: dict[str, set[str]] = {name: set() for name in [_lg.START, *builder.nodes]}
+    for start, end in builder.edges:
+        succ.setdefault(start, set()).add(end)
+    for starts, end in builder.waiting_edges:
+        for start in starts:
+            succ.setdefault(start, set()).add(end)
+    for start, branches in builder.branches.items():
+        for branch in branches.values():
+            ends = getattr(branch, "ends", None)
+            succ.setdefault(start, set()).update(set(ends.values()) if ends else everywhere)
+    for name, spec in builder.nodes.items():
+        ends = getattr(spec, "ends", None)  # Command(goto=...) targets declared on the node
+        if ends:
+            succ[name].update(ends)
+    return succ
+
+
+def _reaches(graph: Any, pending: set[str], targets: list[str], *, finished: bool) -> bool:
+    """Whether a thread waiting on `pending` (or, if finished, one given new input) can reach `targets`."""
+    if "*" in targets:
+        return True
+    succ = _successors(graph)
+    frontier = [_lg.START] if finished else [n for n in pending if n in succ]
+    seen: set[str] = set()
+    while frontier:
+        node = frontier.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        if node in targets:
+            return True
+        frontier.extend(succ.get(node, ()))
+    return False
 
 
 def _breakpoints(graph: Any) -> list[str]:

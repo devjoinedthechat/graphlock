@@ -28,7 +28,9 @@ __all__ = [
     "convert_field",
     "defer_changed",
     "drop_field",
+    "drop_node",
     "graph_for_ns",
+    "redirect_node",
     "rename_channel",
     "rename_field",
     "rename_node",
@@ -205,18 +207,57 @@ class rename_node(Migration):
         self, ctx: MigrationContext, renames: dict[str, str], sends: Sequence[Any]
     ) -> dict[str, str]:
         """Old task id -> new task id for every task LangGraph derives from the node's name."""
-        ids: dict[str, str] = {}
         ckpt = ctx.checkpoint
-        new_triggers = list(ctx.graph.nodes[self.new].triggers)
         back = {v: k for k, v in renames.items()}
-        old_triggers = [back.get(t) or _swap_node(t, self.new, self.old) for t in new_triggers]
-        old_id = _lg.pull_task_id(ckpt, ctx.ns, ctx.step, self.old, old_triggers)  # type: ignore[arg-type]
-        ids[old_id] = _lg.pull_task_id(ckpt, ctx.ns, ctx.step, self.new, new_triggers)  # type: ignore[arg-type]
+        ids = _rekeyed_tasks(
+            ctx, lambda t: back.get(t) or _swap_node(t, self.new, self.old), self.old, self.new
+        )
         for index, send in enumerate(sends):
             if isinstance(send, _lg.Send) and send.node == self.old:
                 old_push = _lg.push_task_id(ckpt, ctx.ns, ctx.step, self.old, index)  # type: ignore[arg-type]
                 ids[old_push] = _lg.push_task_id(ckpt, ctx.ns, ctx.step, self.new, index)  # type: ignore[arg-type]
         return ids
+
+
+def _rekeyed_tasks(
+    ctx: MigrationContext, old_name_of: Callable[[str], str], old_node: str | None, new_node: str | None
+) -> dict[str, str]:
+    """Old task id -> new task id for every task whose id a rename changes.
+
+    A task's id hashes its node's name and its trigger channels. Renaming a node changes the first
+    for that node, and the second for every node triggered through a channel that carries the name,
+    such as the fan-in into a node downstream of it. Their stored interrupts and answers are keyed by
+    the old id; re-keying them keeps them attached to the task that will run.
+    """
+    ids: dict[str, str] = {}
+    for name, node in ctx.graph.nodes.items():
+        triggers = list(node.triggers)
+        old_triggers = [old_name_of(t) for t in triggers]
+        old_name = old_node if name == new_node and old_node is not None else name
+        if old_triggers == triggers and old_name == name:
+            continue
+        old_id = _lg.pull_task_id(ctx.checkpoint, ctx.ns, ctx.step, old_name, old_triggers)  # type: ignore[arg-type]
+        ids[old_id] = _lg.pull_task_id(ctx.checkpoint, ctx.ns, ctx.step, name, triggers)  # type: ignore[arg-type]
+    return ids
+
+
+def _rekey_writes(ctx: MigrationContext, ids: dict[str, str]) -> None:
+    """Move pending writes, and the ids of stored interrupts, to the tasks' new ids."""
+    if not ids:
+        return
+    by_new_id: dict[str, str] = {}
+    for name, node in ctx.graph.nodes.items():
+        tid = _lg.pull_task_id(ctx.checkpoint, ctx.ns, ctx.step, name, list(node.triggers))  # type: ignore[arg-type]
+        by_new_id[tid] = name
+    writes = []
+    for tid, channel, value in ctx.pending_writes:
+        new_tid = ids.get(tid, tid)
+        if tid in ids and channel == _lg.INTERRUPT and new_tid in by_new_id:
+            reid = [_reid_interrupt(i, ctx.ns, by_new_id[new_tid], new_tid) for i in value]
+            writes.append((new_tid, channel, reid))
+        else:
+            writes.append((new_tid, channel, value))
+    ctx.pending_writes[:] = writes
 
 
 def _swap_node(channel: str, old: str, new: str) -> str:
@@ -258,6 +299,66 @@ def _is_after_finish_pair(value: Any) -> bool:
     return isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[1], bool)
 
 
+class redirect_node(rename_node):
+    """A node was removed; send the work that was pending for it to another node instead.
+
+    The same repair as `rename_node`, aimed at a node that already exists: a thread waiting to run
+    `old` runs `to` when it resumes.
+    """
+
+    def __init__(self, old: str, to: str, *, graph: str = "") -> None:
+        super().__init__(old, to, graph=graph)
+
+    def describe(self) -> str:
+        return f"redirect_node({self.old!r}, to={self.new!r})" + (f" in {self.graph!r}" if self.graph else "")
+
+
+class drop_node(Migration):
+    """A node was removed on purpose; forget what threads still hold for it.
+
+    Threads that already ran the node keep a stale trigger for it, which makes interrupt_before
+    breakpoints re-fire forever (GL101). A thread still waiting to run the node resumes without it.
+    """
+
+    def __init__(self, node: str, *, graph: str = "") -> None:
+        self.node, self.graph = node, graph
+
+    def describe(self) -> str:
+        return f"drop_node({self.node!r})" + (f" in {self.graph!r}" if self.graph else "")
+
+    def handles(self, finding: Finding) -> bool:
+        return finding.graph == self.graph and finding.code == "GL101" and finding.subject == self.node
+
+    def _mentions(self, channel: str) -> bool:
+        if channel == _lg.branch_channel(self.node):
+            return True
+        join = _lg.parse_join(channel)
+        return join is not None and (self.node in join[0] or join[1] == self.node)
+
+    def apply(self, ctx: MigrationContext) -> bool:
+        if self.node in ctx.graph.nodes:
+            return False  # the node is back: its triggers are live again
+        stale = {c for c in set(ctx.values) | set(ctx.versions) if self._mentions(c)}
+        tasks = ctx.values.get(_lg.TASKS) or []
+        stale_sends = [s for s in tasks if isinstance(s, _lg.Send) and s.node == self.node]
+        if not stale and not stale_sends and self.node not in ctx.seen:
+            return False
+        for channel in stale:
+            ctx.values.pop(channel, None)
+            ctx.versions.pop(channel, None)
+        for node_seen in ctx.seen.values():
+            for channel in stale:
+                node_seen.pop(channel, None)
+        ctx.seen.pop(self.node, None)
+        if stale_sends:
+            ctx.values[_lg.TASKS] = [s for s in tasks if s not in stale_sends]
+        updated = ctx.checkpoint.get("updated_channels")
+        if updated:
+            ctx.checkpoint["updated_channels"] = [c for c in updated if c not in stale]
+        ctx.pending_writes[:] = [w for w in ctx.pending_writes if not self._mentions(w[1])]
+        return True
+
+
 class rename_channel(Migration):
     """A channel was renamed: a state field, or a fan-in whose sources were re-listed."""
 
@@ -279,12 +380,14 @@ class rename_channel(Migration):
             and not any(ch == self.old for _, ch, _ in ctx.pending_writes)
         ):
             return False
+        ids = _rekeyed_tasks(ctx, lambda t: self.old if t == self.new else t, None, None)
         _move_channel(ctx, self.old, self.new)
         _rename_seen(ctx, {self.old: self.new})
         _rename_updated(ctx, {self.old: self.new})
         ctx.pending_writes[:] = [
             (tid, self.new if ch == self.old else ch, v) for tid, ch, v in ctx.pending_writes
         ]
+        _rekey_writes(ctx, ids)
         return True
 
 
@@ -509,6 +612,11 @@ class defer_changed(Migration):
             if fixed is not value:
                 ctx.values[name] = fixed
                 changed = True
+                # The run loop only plans nodes whose trigger is in `updated_channels`. A deferred
+                # trigger waited for the run's end to be planned; as a plain trigger it must be listed.
+                updated = ctx.checkpoint.get("updated_channels")
+                if updated is not None and name not in updated:
+                    ctx.checkpoint["updated_channels"] = sorted([*updated, name])
         return changed
 
 
@@ -519,7 +627,13 @@ def _fit_channel_shape(channel: Any, value: Any) -> Any:
     if isinstance(channel, _lg.EphemeralValue):
         return value[0] if _is_after_finish_pair(value) else value
     if isinstance(channel, _lg.NamedBarrierValueAfterFinish):
-        return value if _is_after_finish_pair(value) else (set(value), False)
+        if _is_after_finish_pair(value):
+            return value
+        # A complete barrier was already due under the old code (the thread may even be paused inside
+        # the node), so it stays due. The run loop only finishes deferred channels when other tasks
+        # end in the same resume, so leaving it unfinished could strand it.
+        seen = set(value)
+        return (seen, seen == set(channel.names))
     if isinstance(channel, _lg.NamedBarrierValue):
         return set(value[0]) if _is_after_finish_pair(value) else value
     return value

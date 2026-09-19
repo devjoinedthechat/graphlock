@@ -17,7 +17,7 @@
   <a href="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/graphlock/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
-  <img src="https://img.shields.io/badge/tests-308-brightgreen" alt="308 tests">
+  <img src="https://img.shields.io/badge/tests-345-brightgreen" alt="345 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
   <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
@@ -115,17 +115,20 @@ LangGraph 1.2.11, `SqliteSaver`:
 |---|---|---|---|---|
 | Rename the node a thread is paused before | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
 | Rename a node that is waiting in interrupt() | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
-| Remove the node a thread is paused before | **wrong result, no error** | GL101 | GL101 | — |
+| Remove the node a thread is paused before | **wrong result, no error** | GL101 | GL101 | `redirect_node` ✓ |
+| Rename a node the thread already passed, in a graph with a later breakpoint | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
 | Rename a node that pending Send()s are addressed to | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
-| Rename a node that finished in parallel with one now waiting in interrupt() | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
+| Rename a node that finished in parallel with one now waiting in interrupt() | **wrong result, no error** | GL101 | GL101, GL103 | `rename_node` ✓ |
 | Rename a subgraph node while a thread is paused inside it | **wrong result, no error** | GL101 | GL101 | — |
 | Rename the node a thread is waiting in, inside a subgraph | **wrong result, no error** | GL101 | GL101 | `rename_node` ✓ |
 | Swap two interrupt() calls inside a subgraph while a thread sits between them | **wrong result, no error** | GL401 | GL401 | — |
 | Turn on defer= for a node a thread is paused before ([langgraph#8629](https://github.com/langchain-ai/langgraph/issues/8629)) | crashes on resume | GL102 | GL102 | `defer_changed` ✓ |
-| Turn off defer= for a node a thread is paused before | resumes correctly | (GL102) | — | — |
+| Turn off defer= for a node a thread is paused before | resumes correctly | GL102 | — | — |
+| Turn off defer= for a node that is waiting for its run to finish | **wrong result, no error** | GL102 | GL102 | `defer_changed` ✓ |
 | Turn on defer= for a fan-in node while its barrier is half full ([langgraph#8618](https://github.com/langchain-ai/langgraph/issues/8618)) | crashes on resume | GL102 | GL102 | `defer_changed` ✓ |
 | Turn off defer= for a fan-in node while its barrier is half full ([langgraph#8618](https://github.com/langchain-ai/langgraph/issues/8618)) | crashes on resume | GL102 | GL102 | `defer_changed` ✓ |
 | List a fan-in's sources in a different order while its barrier is half full | **wrong result, no error** | GL103 | GL103 | `rename_channel` ✓ |
+| List a fan-in's sources in another order while a finished source's write is still pending | **wrong result, no error** | GL103 | GL103 | `rename_channel` ✓ |
 | Add a required field to Pydantic state | crashes on resume | GL201 | GL201 | `set_default` ✓ |
 | Change a Pydantic state field from str to int | crashes on resume | GL202 | GL202 | `convert_field` ✓ |
 | Rename a class whose objects are stored in state | **wrong result, no error** | GL301 | GL301 | `revive` ✓ |
@@ -139,11 +142,14 @@ LangGraph 1.2.11, `SqliteSaver`:
 | Remove a state field while a thread waits in interrupt() before a breakpoint | **wrong result, no error** | GL203 | GL203 | `drop_field` ✓ |
 | Add a reducer to a state field | resumes correctly | (GL204) | — | — |
 
-Eighteen of the twenty-five changes break a paused thread, and **thirteen of those raise no error**:
+Twenty-one of the twenty-eight changes break a paused thread, and **sixteen of those raise no error**:
 the thread finishes early, waits forever, or carries on with wrong data. A rule in parentheses is
 reported but doesn't fail the check. LangGraph 1.0.0 and 1.1.0 behave the same on every row.
 
-Four of them are easy to walk into:
+Five of them are easy to walk into:
+- **Renaming a node the thread already passed** strands it at the next `interrupt_before`
+  breakpoint. The old node's trigger is left behind in the checkpoint, where it trips the bug
+  described in the last item below.
 - **Reordering `add_edge(["x", "y2"], "join")` to `["y2", "x"]`** renames the fan-in's channel. A
   thread where `x` already finished waits for it forever, and `join` never runs.
 - **Swapping two `interrupt()` calls** gives the new first question the answer to the old first
@@ -273,7 +279,7 @@ as `graphlock.scan()` and, for async checkpointers, `await graphlock.ascan()`.
 | Rule | | What happens to a stored thread |
 |---|---|---|
 | GL101 | node-removed | Paused at the node, or with pending work for it: resumes as if finished. Silent |
-| GL102 | defer-changed | The trigger restores into the wrong channel class, and resuming raises |
+| GL102 | defer-changed | The trigger restores into the wrong channel class and resuming raises, or a deferred node waiting for its run to finish never runs. The second is silent |
 | GL103 | join-changed | A half-full fan-in is renamed and its target never runs. Silent |
 | GL104 | subgraph-changed | Paused inside a node that stopped or started being a subgraph: loses the subgraph's state |
 | GL201 | required-field-added | No stored value, so validation fails at the next node |
@@ -285,9 +291,9 @@ as `graphlock.scan()` and, for async checkpointers, `await graphlock.ascan()`.
 | GL401 | interrupt-order-changed | Paused inside the node: stored answers go to the wrong `interrupt()` calls. Silent |
 | GL402 | interrupting-node-changed | Paused inside the node: the new code runs from the top on resume |
 
-GL102 is informational when `defer` is turned off for a node with one predecessor, because pending
-triggers restore fine. GL203 is informational in a graph with no `interrupt_before` breakpoints;
-`interrupt_after` is not affected.
+GL203 is informational in a graph with no `interrupt_before` breakpoints; `interrupt_after` is not
+affected. `check` reports what *any* stored thread could hit. `scan` reports what each stored thread
+*will* hit, and is exact about it: see [what the property tests found](#what-the-property-tests-found).
 
 ## Migrations
 
@@ -302,6 +308,8 @@ and the same list can run on every read.
 | `rename_channel(old, new)` | GL103, and any other renamed channel |
 | `rename_field(old, new)` | A renamed state field |
 | `drop_field(field)` | GL203. Forgets a removed field's stored value and version |
+| `redirect_node(old, to=node)` | GL101 for a removed node. Sends the work pending for it to another node |
+| `drop_node(node)` | GL101 for a removed node. Forgets its leftover triggers, so threads that already passed it get past later breakpoints |
 | `set_default(field, value)` | GL201. Gives threads a value they never had |
 | `convert_field(field, fn)` | GL202 and GL205. Converts only the stored values that fail the field's new type |
 | `revive(old_path, NewClass)` | GL301. Rebuilds objects of a renamed or moved class |
@@ -358,14 +366,14 @@ To make a rename safe to roll back, expand before you contract:
 
 graphlock rests on claims about what LangGraph does, so those claims are tests.
 
-[tests/corpus.py](tests/corpus.py) holds the 25 redeploy scenarios in the table above. Each pauses
+[tests/corpus.py](tests/corpus.py) holds the 28 redeploy scenarios in the table above. Each pauses
 a thread under one graph, deploys another and resumes. [tests/test_corpus.py](tests/test_corpus.py)
 checks four things for every scenario, against `InMemorySaver`, `SqliteSaver` and `PostgresSaver`:
 
 | Test | Asserts |
 |---|---|
 | `test_what_langgraph_does_today` | What LangGraph does with no help. It fails if a LangGraph release fixes one of these, so the table can't go stale |
-| `test_check_reports_the_change` | `check` reports the right rule as blocking, and nothing blocking for the seven safe changes |
+| `test_check_reports_the_change` | `check` reports the right rule as blocking, and nothing blocking for the six changes no stored thread can trip over |
 | `test_scan_reports_the_paused_thread` | `scan` reports the right rule for that thread, and for no other |
 | `test_migration_repairs_the_thread` | With the migration, the thread resumes correctly and `check` and `scan` mark the rule repaired. Once the thread moves on, nothing needs the migration any more |
 
@@ -379,6 +387,7 @@ Around the corpus:
 | [test_security.py](tests/test_security.py) | `scan` imports nothing a checkpoint names, and nothing a strict serializer blocks |
 | [test_stores.py](tests/test_stores.py) | The one-query path to each thread's latest checkpoint agrees with the checkpointer's own `list()` |
 | [test_filters.py](tests/test_filters.py) | In a store shared by several graphs, only the graph's own threads are counted |
+| [test_properties.py](tests/test_properties.py) | Random graphs, refactors and pause points; see below |
 | [test_cli.py](tests/test_cli.py) | The whole flow on [examples/refunds](examples/refunds), including rollback checks |
 
 The suite passes on LangGraph 1.0.0, 1.1.0 and 1.2.11, and on Python 3.10 to 3.14. The CI workflow
@@ -402,6 +411,42 @@ Building the corpus corrected graphlock five times:
 - **Postgres doesn't overwrite.** Running the corpus on Postgres showed that a repair made in place is
   never persisted, because Postgres keeps the first value stored at a version. The docs now say so,
   and the tests assert what each checkpointer does.
+
+### What the property tests found
+
+The corpus pins the failures someone thought of. [tests/test_properties.py](tests/test_properties.py)
+looks for the rest, using [Hypothesis](https://hypothesis.readthedocs.io). Each example builds a
+random graph: a DAG with fan-ins, nodes that wait in `interrupt()`, `defer` flags, a breakpoint and
+an extra state field. It pauses a thread at a random point, deploys a refactor that shouldn't change
+the result, and resumes. Every node logs a label that survives renames, so the oracle is the same
+graph run straight through. Four properties must hold:
+
+1. **`check` misses nothing.** If the thread ends wrong, `check` reported a blocking finding.
+2. **`scan` is exact.** It flags the thread if and only if the thread ends wrong.
+3. **The migration repairs the thread.**
+4. **`check --reverse` misses nothing** when the thread is paused under the new graph and resumed
+   under the old one.
+
+The first run failed within seconds. Every failure was minimised to a graph of three to six nodes,
+fixed, and pinned in the corpus:
+- **A node the thread had already passed, once renamed,** stranded it at a later `interrupt_before`.
+  `scan` now checks every channel the graph no longer has, not only fields.
+- **Turning `defer` off** was rated safe after one probe. It isn't: a deferred node that is waiting
+  for its run to finish is never scheduled again. GL102 now blocks on it.
+- **A rename changes the task ids of nodes downstream of it,** because a task's id hashes its trigger
+  channels. `rename_node` had re-keyed only the renamed node's own tasks, which left a paused fan-in
+  node's interrupt orphaned. Every task a rename affects is now re-keyed.
+- **A finished sibling's pending write** to a renamed fan-in is dropped by LangGraph with only a log
+  line. `scan` now checks pending writes against the new graph.
+- **`scan` was too eager three times.** A stale channel matters only if its version is newer than what
+  the breakpoint has seen. A deferred trigger is lost only if it isn't in `updated_channels`. A
+  wrong-shaped fan-in that holds nothing matters only if one of its sources can still run. `scan`
+  now checks each condition in the stored checkpoint.
+
+The suite runs 100 examples per property. `HYPOTHESIS_PROFILE=deep` runs 3,000; the last deep run
+passed all 12,000. The harness runs one task at a time (`max_concurrency=1`). With LangGraph's
+default concurrency, which parallel tasks finish before an interrupt varies from run to run, and a
+failing example can't be replayed.
 
 ## Scale
 
@@ -450,10 +495,11 @@ path; `list()` fetches every checkpoint first.
 
 ```sh
 uv sync
-uv run pytest                            # 308 tests, about ten seconds with Postgres
+uv run pytest                            # 345 tests, about twenty seconds with Postgres
 uv run ruff check . && uv run mypy src   # strict
 uv run python scripts/evidence.py        # the table above, against the installed LangGraph
 uv run python scripts/bench_scan.py      # the Scale table (add --postgres URL for Postgres)
+HYPOTHESIS_PROFILE=deep uv run pytest tests/test_properties.py   # 12,000 random redeploys, ~10 minutes
 ```
 
 The layout:

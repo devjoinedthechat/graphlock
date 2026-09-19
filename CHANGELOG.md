@@ -19,4 +19,8 @@ First version.
   `--sample` and `--progress`. On SQLite and Postgres it finds each thread's latest checkpoint with
   one query: 100,000 threads in 11s on SQLite and 72s on Postgres.
 - Corpus scenarios for changes inside a subgraph.
+- Property tests (Hypothesis): random graphs, refactors and pause points, checked against what
+  LangGraph does. They found four silent failure classes and three kinds of false alarm, all now
+  fixed and pinned in the corpus. Turning `defer` off is now breaking (GL102).
+- `redirect_node` and `drop_node` migrations for removed nodes.
 - Tested against LangGraph 1.0.0, 1.1.0 and 1.2.11, and Python 3.10 to 3.14.
