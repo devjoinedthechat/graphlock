@@ -19,7 +19,6 @@
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
   <img src="https://img.shields.io/badge/tests-372-brightgreen" alt="372 tests">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
-  <img src="https://img.shields.io/badge/status-pre--alpha-orange" alt="Status: pre-alpha">
 </p>
 
 <p align="center">
