@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue" alt="Python 3.10–3.14">
   <img src="https://img.shields.io/badge/LangGraph-1.0%20%E2%80%93%201.2-1c3c3c" alt="LangGraph 1.0–1.2">
   <img src="https://img.shields.io/badge/tests-372-brightgreen" alt="372 tests">
-  <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
 </p>
 
 <p align="center">
@@ -538,6 +538,6 @@ a corpus scenario** that shows what LangGraph does without it.
 
 ## License
 
-[Apache-2.0](LICENSE)
+[MIT](LICENSE)
 
 graphlock is an independent project. It is not produced or endorsed by LangChain, Inc.
